@@ -78,8 +78,8 @@ This starts three services:
 - `tts` on `http://localhost:8880` (Kokoro-FastAPI, voiceover)
 - `app` on `http://localhost:3005` (this Node frontend)
 
-When using compose, the app talks to Presenton at `http://presenton:5001`
-via the internal Docker network. `PRESENTON_URL` is set automatically in
+When using compose, the app talks to Presenton at `http://presenton`
+(via the internal Docker network, port 80). `PRESENTON_URL` is set automatically in
 `docker-compose.yml`. TTS defaults to **OpenAI TTS** (cloud, ~$0.045 per
 10-slide deck) so there's no local TTS container. The Kokoro container
 is included in the compose file as commented-out YAML; uncomment it if
@@ -206,7 +206,7 @@ All settings live in `.env`:
 
 | Variable            | Default                  | Notes |
 |---------------------|--------------------------|-------|
-| `PRESENTON_URL`     | `http://localhost:5001`  | Where Presenton is reachable |
+| `PRESENTON_URL`     | `http://localhost:5001`  | Where Presenton is reachable. Inside Docker Compose this is `http://presenton` (port 80) |
 | `TTS_URL`           | `https://api.openai.com/v1/audio/speech` | Any OpenAI-compatible TTS endpoint |
 | `TTS_VOICE`         | `nova`                   | OpenAI: `alloy`/`nova`/`shimmer`/`onyx`/etc. Kokoro: `af_heart`/`af_bella`/etc. |
 | `TTS_MODEL`         | `tts-1`                  | `tts-1` (fast) or `tts-1-hd` (higher quality, same price) |

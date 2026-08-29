@@ -21,7 +21,7 @@ services:
     ports:
       - "3005:3005"
     environment:
-      - PRESENTON_URL=http://presenton:5001
+      - PRESENTON_URL=http://presenton
       - PORT=3005
       - PPT_TEMPLATE=${PPT_TEMPLATE:-general}
       - PPT_SLIDES=${PPT_SLIDES:-10}
