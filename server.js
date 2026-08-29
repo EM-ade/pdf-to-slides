@@ -106,14 +106,24 @@ app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) 
 
   const wantVoiceover = req.query.voiceover === '1' || req.body.voiceover === '1';
 
+  // Optional per-request slide count (1-50). Overrides PPT_SLIDES from .env.
+  const slidesParam = req.query.slides || req.body.slides;
+  let slides;
+  if (slidesParam !== undefined && slidesParam !== null && slidesParam !== '') {
+    slides = parseInt(slidesParam, 10);
+    if (!Number.isFinite(slides) || slides < 1 || slides > 50) {
+      return res.status(400).json({ error: 'slides must be a number between 1 and 50' });
+    }
+  }
+
   const deckId = uuidv4();
   const deckDir = path.join(decksDir, deckId);
 
   try {
     fs.mkdirSync(deckDir, { recursive: true });
 
-    console.log(`Processing PDF: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}`);
-    const manifest = await processPDF(req.file.path, deckDir, { voiceover: wantVoiceover });
+    console.log(`Processing PDF: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
+    const manifest = await processPDF(req.file.path, deckDir, { voiceover: wantVoiceover, slides });
 
     // If voiceover is on, build a single .zip with pptx + mp3.
     let downloadUrl;
@@ -169,6 +179,59 @@ app.get('/api/decks/:deckId/manifest', (req, res) => {
   }
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
   res.json(manifest);
+});
+
+// List all generated decks (id, title, slide count, generatedAt, sizes).
+app.get('/api/decks', (req, res) => {
+  const list = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(decksDir, { withFileTypes: true });
+  } catch (e) {
+    return res.json({ decks: [] });
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const deckDir = path.join(decksDir, ent.name);
+    let manifest = null;
+    try {
+      const manifestPath = path.join(deckDir, 'manifest.json');
+      if (fs.existsSync(manifestPath)) manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch (_) { /* ignore malformed */ }
+    const size = (() => {
+      try {
+        return fs.readdirSync(deckDir)
+          .map((f) => fs.statSync(path.join(deckDir, f)).size)
+          .reduce((a, b) => a + b, 0);
+      } catch (_) { return 0; }
+    })();
+    list.push({
+      deckId: ent.name,
+      title: (manifest && manifest.title) || ent.name,
+      slideCount: (manifest && manifest.slideCount) || 0,
+      generatedAt: (manifest && manifest.generatedAt) || null,
+      hasVoiceover: !!(manifest && manifest.voiceoverUrl),
+      viewerUrl: (manifest && manifest.viewerUrl) || `/decks/${ent.name}/view`,
+      sizeBytes: size,
+    });
+  }
+  list.sort((a, b) => String(b.generatedAt || '').localeCompare(String(a.generatedAt || '')));
+  res.json({ decks: list });
+});
+
+// Delete a deck (rm -rf the deck directory).
+app.delete('/api/decks/:deckId', requireApiToken, (req, res) => {
+  const deckId = req.params.deckId;
+  // Basic path safety: only allow UUID-ish names to avoid path traversal.
+  if (!/^[0-9a-fA-F-]{8,64}$/.test(deckId)) {
+    return res.status(400).json({ error: 'Invalid deck id' });
+  }
+  const deckDir = path.join(decksDir, deckId);
+  if (!fs.existsSync(deckDir)) {
+    return res.status(404).json({ error: 'Deck not found' });
+  }
+  fs.rmSync(deckDir, { recursive: true, force: true });
+  res.json({ success: true, deleted: deckId });
 });
 
 // Embed API: accepts slide content + voiceover preferences, generates the

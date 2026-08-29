@@ -806,6 +806,8 @@ async function renderSlidesViaLibreOffice(pptxPath, deckDir) {
 
 async function processPDF(pdfPath, deckDir, options = {}) {
   const wantVoiceover = options.voiceover === true;
+  // Per-request slide count override (defaults to env PPT_SLIDES).
+  const nSlides = Math.max(1, parseInt(options.slides, 10) || N_SLIDES);
   console.log('  [1/4] Uploading PDF to Presenton...');
   const uploadUrl = `${PRESENTON_URL}/api/v1/ppt/files/upload`;
   const uploaded = await postMultipart(uploadUrl, pdfPath, 'files');
@@ -845,7 +847,7 @@ async function processPDF(pdfPath, deckDir, options = {}) {
   const payload = {
     content: 'Generate a professional presentation from this document.',
     files: [remotePath || fileId],
-    n_slides: N_SLIDES,
+    n_slides: nSlides,
     template: TEMPLATE,
     tone: TONE,
     verbosity: VERBOSITY,
@@ -916,7 +918,7 @@ async function processPDF(pdfPath, deckDir, options = {}) {
 
   return finalizeDeck(deckDir, pptxPath, {
     title: path.basename(outputRemote, path.extname(outputRemote)),
-    slideCount: N_SLIDES,
+    slideCount: nSlides,
     presentationId,
     template: TEMPLATE,
     wantVoiceover,

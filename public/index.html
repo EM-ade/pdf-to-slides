@@ -144,6 +144,42 @@
       margin-bottom: 16px;
     }
     .demo-banner strong { color: #5a3f0c; }
+    .opt-row select, .opt-row input[type="number"] {
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #2c3e50;
+      background: #fff;
+    }
+    .deck-list { margin-top: 24px; }
+    .deck-list h2 { font-size: 16px; color: #2c3e50; margin-bottom: 8px; }
+    .deck-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: #fff;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .deck-item .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #2c3e50; font-size: 14px; }
+    .deck-item .meta2 { color: #999; font-size: 12px; white-space: nowrap; }
+    .deck-item a { color: #3498db; text-decoration: none; font-size: 13px; white-space: nowrap; }
+    .deck-item a:hover { text-decoration: underline; }
+    .deck-item .delete-btn {
+      background: none;
+      border: 1px solid #e74c3c;
+      color: #e74c3c;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .deck-item .delete-btn:hover { background: #e74c3c; color: #fff; }
+    .deck-list .empty { color: #999; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -172,12 +208,22 @@
         <input type="checkbox" id="voiceoverCb" checked>
         <span>Add voiceover narration <small>(OpenAI TTS, ~15s for 10 slides)</small></span>
       </label>
+      <label class="opt-row">
+        <span>Number of slides</span>
+        <input type="number" id="slideCountInput" min="1" max="50" value="10">
+        <small>(1–50)</small>
+      </label>
       <button class="btn btn-primary" id="uploadBtn" disabled>Generate Slides</button>
 
       <div class="status" id="status"></div>
       <p class="meta" id="meta" style="display:none"></p>
       <a href="#" class="btn btn-primary view-btn" id="viewBtn" download>Download .pptx</a>
       <a href="#" class="btn btn-primary view-btn" id="playBtn" target="_blank" rel="noopener" style="display:none; margin-top:8px; background:#27ae60;">▶ Play in browser</a>
+
+      <div class="deck-list">
+        <h2>Generated decks</h2>
+        <div id="deckList"></div>
+      </div>
     </div>
   </div>
 
@@ -235,6 +281,55 @@
     }
 
     const voiceoverCb = document.getElementById('voiceoverCb');
+    const slideCountInput = document.getElementById('slideCountInput');
+    const deckList = document.getElementById('deckList');
+
+    async function loadDecks() {
+      try {
+        const r = await fetch('/api/decks');
+        const data = await r.json();
+        const decks = data.decks || [];
+        deckList.innerHTML = '';
+        if (!decks.length) {
+          deckList.innerHTML = '<div class="empty">No decks yet. Generate one above.</div>';
+          return;
+        }
+        for (const d of decks) {
+          const item = document.createElement('div');
+          item.className = 'deck-item';
+          const date = d.generatedAt ? new Date(d.generatedAt).toLocaleString() : '—';
+          const size = d.sizeBytes ? `${(d.sizeBytes / 1048576).toFixed(1)} MB` : '';
+          item.innerHTML =
+            `<span class="title" title="${d.deckId}">${escapeHtml(d.title || d.deckId)}</span>` +
+            `<span class="meta2">${d.slideCount} slides · ${date} ${size ? '· ' + size : ''}</span>` +
+            (d.hasVoiceover ? `<a href="${d.viewerUrl}" target="_blank" rel="noopener">▶ Play</a>` : '') +
+            `<a href="/decks/${d.deckId}/deck.pptx" download>↓ .pptx</a>` +
+            `<button class="delete-btn" data-id="${d.deckId}">Delete</button>`;
+          item.querySelector('.delete-btn').addEventListener('click', () => deleteDeck(d.deckId, item));
+          deckList.appendChild(item);
+        }
+      } catch (e) {
+        deckList.innerHTML = '<div class="empty">Could not load decks.</div>';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    async function deleteDeck(deckId, itemEl) {
+      if (!confirm(`Delete deck ${deckId}? This cannot be undone.`)) return;
+      try {
+        const r = await fetch(`/api/decks/${deckId}`, { method: 'DELETE' });
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          throw new Error(data.error || 'Delete failed');
+        }
+        itemEl.remove();
+      } catch (e) {
+        alert('Delete failed: ' + e.message);
+      }
+    }
 
     uploadBtn.addEventListener('click', async () => {
       if (!selectedFile) return;
@@ -243,6 +338,8 @@
       formData.append('pdf', selectedFile);
 
       const wantVoiceover = voiceoverCb.checked;
+      const slideCount = parseInt(slideCountInput.value, 10);
+      const slidesParam = (!isNaN(slideCount) && slideCount >= 1 && slideCount <= 50) ? slideCount : 10;
 
       uploadBtn.disabled = true;
       const deckMs = '30\u201390s';
@@ -253,7 +350,7 @@
       status.innerHTML = `<span class="spinner"></span>${deckText}`;
 
       try {
-        const response = await fetch(`/api/upload${wantVoiceover ? '?voiceover=1' : ''}`, {
+        const response = await fetch(`/api/upload${wantVoiceover ? '?voiceover=1' : ''}&slides=${slidesParam}`, {
           method: 'POST',
           body: formData
         });
@@ -286,12 +383,15 @@
           ? `${sizeLine} \u00b7 voiceover: ${formatBytes(m.voiceoverBytes)}`
           : sizeLine;
         meta.style.display = 'block';
+        loadDecks();
       } catch (error) {
         status.className = 'status show error';
         status.textContent = error.message;
         uploadBtn.disabled = false;
       }
     });
+
+    loadDecks();
   </script>
 </body>
 </html>
