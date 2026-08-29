@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slide Viewer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #000;
+      color: #eee;
+    }
+
+    /* ---------- Full-bleed stage (always present) ---------- */
+    .stage {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+    }
+    .canvas {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      max-width: 100vw;
+      max-height: 100vh;
+      /* Maintain 16:9 letterboxing when viewport doesn't match */
+      aspect-ratio: 16 / 9;
+      background: #000;
+      overflow: hidden;
+    }
+    .canvas.fill {
+      /* Fill the viewport; allow slight cropping on extreme aspects */
+      aspect-ratio: auto;
+      width: 100vw;
+      height: 100vh;
+    }
+    .slide {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      transition: opacity 280ms ease;
+      pointer-events: none;
+    }
+    .slide.active { opacity: 1; pointer-events: auto; }
+    .slide .bg { position: absolute; inset: 0; }
+    .slide .item { position: absolute; }
+    .slide .item.text {
+      display: flex;
+      align-items: flex-start;
+      justify-content: flex-start;
+      white-space: pre-wrap;
+      line-height: 1.2;
+      overflow: visible;
+      font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+    }
+    .slide .item.text.center { justify-content: center; text-align: center; }
+    .slide .item.text.right { justify-content: flex-end; text-align: right; }
+    .slide .item.text.bold { font-weight: 700; }
+    .slide .item.image img,
+    .slide .item.image svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+
+    /* ---------- Top bar (only in editor mode) ---------- */
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: rgba(20, 20, 20, 0.95);
+      border-bottom: 1px solid #2a2a2a;
+      z-index: 50;
+    }
+    body.mode-editor .topbar { display: flex; }
+    .topbar .title { font-size: 13px; color: #ccc; }
+    .topbar a { color: #4ea8ff; text-decoration: none; font-size: 12px; }
+
+    /* ---------- Bottom controls (only in editor mode) ---------- */
+    .controls {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      background: rgba(20, 20, 20, 0.95);
+      border-top: 1px solid #2a2a2a;
+      z-index: 50;
+    }
+    body.mode-editor .controls { display: flex; }
+    .btn {
+      background: #2a2a2a;
+      color: #eee;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn:hover { background: #3a3a3a; }
+    .btn.primary { background: #4ea8ff; color: #fff; }
+    .btn.primary:hover { background: #6fb9ff; }
+    .scrubber {
+      flex: 1 1 auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+      color: #aaa;
+    }
+    .scrubber input[type=range] {
+      flex: 1 1 auto;
+      accent-color: #4ea8ff;
+    }
+    .counter {
+      flex: 0 0 auto;
+      font-size: 12px;
+      color: #ccc;
+      min-width: 60px;
+      text-align: right;
+    }
+    .hint {
+      font-size: 11px;
+      color: #777;
+      text-align: center;
+      padding: 4px 0 8px;
+    }
+
+    /* ---------- Floating "play" button (top-right) ---------- */
+    .float-btn {
+      position: fixed;
+      top: 12px; right: 12px;
+      z-index: 60;
+      background: rgba(20, 20, 20, 0.7);
+      color: #eee;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+      transition: opacity 250ms ease, background 150ms ease;
+    }
+    .float-btn:hover { background: rgba(40, 40, 40, 0.95); }
+
+    /* ---------- Autoplay start overlay ---------- */
+    .start-overlay {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(ellipse at center, rgba(0,0,0,0.65), rgba(0,0,0,0.92));
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      gap: 20px;
+      transition: opacity 350ms ease;
+    }
+    .start-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .start-overlay h1 {
+      color: #fff;
+      font-size: 22px;
+      font-weight: 500;
+      letter-spacing: 0.2px;
+      text-align: center;
+      max-width: 80%;
+    }
+    .start-overlay .subtitle {
+      color: #aaa;
+      font-size: 14px;
+      text-align: center;
+      max-width: 60%;
+    }
+    .start-overlay .play-big {
+      background: #4ea8ff;
+      color: #fff;
+      border: none;
+      border-radius: 50%;
+      width: 88px;
+      height: 88px;
+      font-size: 36px;
+      cursor: pointer;
+      box-shadow: 0 8px 30px rgba(78, 168, 255, 0.4);
+      transition: transform 150ms ease, background 150ms ease;
+    }
+    .start-overlay .play-big:hover {
+      background: #6fb9ff;
+      transform: scale(1.06);
+    }
+    .start-overlay .autoplay-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #ccc;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .start-overlay .autoplay-row input { accent-color: #4ea8ff; }
+
+    /* ---------- In-presentation hint pill (fades out) ---------- */
+    .pill-hint {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(20, 20, 20, 0.75);
+      color: #ddd;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 999px;
+      padding: 8px 16px;
+      font-size: 12px;
+      backdrop-filter: blur(8px);
+      z-index: 55;
+      transition: opacity 400ms ease, transform 400ms ease;
+      pointer-events: none;
+    }
+    .pill-hint.hidden {
+      opacity: 0;
+      transform: translateX(-50%) translateY(10px);
+    }
+
+    /* ---------- Toast for "controls" notice (editor mode only) ---------- */
+    .toast {
+      position: fixed;
+      bottom: 70px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(20, 20, 20, 0.92);
+      color: #ddd;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 12px;
+      backdrop-filter: blur(8px);
+      z-index: 60;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 250ms ease;
+    }
+    .toast.show { opacity: 1; }
+
+    .error {
+      color: #ff7a7a;
+      padding: 20px;
+      text-align: center;
+    }
+
+    /* ---------- Embed mode ---------- */
+    body.mode-embed .topbar { display: none !important; }
+    body.mode-embed .controls { display: none !important; }
+    body.mode-embed .float-btn { display: none !important; }
+    body.mode-embed .pill-hint { display: none !important; }
+    body.mode-embed .start-overlay .autoplay-row { display: none; }
+    body.mode-embed .start-overlay .subtitle { max-width: 80%; }
+
+    .embed-controls {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      z-index: 80;
+      font-variant-numeric: tabular-nums;
+    }
+    body.mode-embed .embed-controls { display: flex; }
+    .embed-controls button {
+      background: rgba(255, 255, 255, 0.15);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .embed-controls button:hover { background: rgba(255, 255, 255, 0.3); }
+    .embed-controls .progress { flex: 1; min-width: 60px; height: 8px; accent-color: #4ea8ff; cursor: pointer; }
+    .embed-controls .time { font-size: 11px; color: #ccc; white-space: nowrap; }
+  </style>
+</head>
+<body class="mode-presentation" tabindex="0">
+
+  <!-- Embed-mode slim control strip (visible only with ?embed=1) -->
+  <div class="embed-controls" id="embedControls" aria-label="Playback controls">
+    <button id="embedPlayBtn" title="Play/Pause (Space)">▶</button>
+    <button id="embedPrevBtn" title="Previous slide (←)">⏮</button>
+    <button id="embedNextBtn" title="Next slide (→)">⏭</button>
+    <button id="embedMuteBtn" title="Mute/unmute voiceover (M)">🔊</button>
+    <button id="embedRestartBtn" title="Restart (R)">↺</button>
+    <button id="embedFullscreenBtn" title="Fullscreen (F)">⛶</button>
+    <input class="progress" id="embedSeek" type="range" min="0" max="100" value="0" step="0.05" aria-label="Seek">
+    <span class="time" id="embedTime">0:00 / 0:00</span>
+  </div>
+
+  <!-- Autoplay start overlay; shown until user clicks Play or autoplay-on-load triggers it -->
+  <div class="start-overlay" id="startOverlay">
+    <h1 id="overlayTitle">Slide Presentation</h1>
+    <div class="subtitle" id="overlaySubtitle">Press play to start. Slides will advance with the voiceover.</div>
+    <button class="play-big" id="playBig" title="Start presentation">▶</button>
+    <label class="autoplay-row">
+      <input type="checkbox" id="autoplayToggle" checked>
+      Autoplay next time
+    </label>
+  </div>
+
+  <!-- Stage with full-bleed canvas -->
+  <div class="stage">
+    <div class="canvas" id="canvas">
+      <div class="error" id="error" style="display:none">Failed to load deck.</div>
+    </div>
+  </div>
+
+  <!-- Editor-mode top bar -->
+  <div class="topbar">
+    <div class="title" id="deckTitle">Slide viewer</div>
+    <div>
+      <a id="pptxLink" href="#" download>Download .pptx</a>
+      &nbsp;|&nbsp;
+      <a id="audioLink" href="#" download>voiceover.mp3</a>
+    </div>
+  </div>
+
+  <!-- Floating "controls" button in presentation mode -->
+  <button class="float-btn" id="showControlsBtn" title="Show controls (C)">⚙ Controls</button>
+
+  <!-- Editor-mode bottom controls -->
+  <div class="controls">
+    <button class="btn primary" id="playBtn">▶ Play</button>
+    <button class="btn" id="restartBtn">↺ Restart</button>
+    <button class="btn" id="prevBtn">◀ Prev</button>
+    <button class="btn" id="nextBtn">Next ▶</button>
+    <div class="scrubber">
+      <span id="curTime">0:00</span>
+      <input type="range" id="seek" min="0" max="100" value="0" step="0.05">
+      <span id="totalTime">0:00</span>
+    </div>
+    <div class="counter" id="counter">1 / 1</div>
+  </div>
+
+  <!-- In-presentation pill that fades after first interaction -->
+  <div class="pill-hint" id="pillHint">Space = play/pause · ←/→ = prev/next · F = fullscreen · C = controls</div>
+
+  <div class="hint" style="display:none">Space = play/pause · ←/→ = prev/next slide · R = restart · F = fullscreen · C = toggle controls</div>
+
+  <div class="toast" id="toast"></div>
+
+  <audio id="audio" preload="auto"></audio>
+
+  <script>
+    // ---------- Setup ----------
+    const pathMatch = location.pathname.match(/\/decks\/([^/]+)\/view/);
+    const deckId = pathMatch ? pathMatch[1] : null;
+    if (!deckId) {
+      const e = document.getElementById('error');
+      e.style.display = 'block';
+      e.textContent = 'No deck id in URL.';
+      throw new Error('no deck id');
+    }
+
+    const audio = document.getElementById('audio');
+    const canvas = document.getElementById('canvas');
+    const playBtn = document.getElementById('playBtn');
+    const playBig = document.getElementById('playBig');
+    const seek = document.getElementById('seek');
+    const curTime = document.getElementById('curTime');
+    const totalTime = document.getElementById('totalTime');
+    const counter = document.getElementById('counter');
+    const errorEl = document.getElementById('error');
+    const deckTitle = document.getElementById('deckTitle');
+    const overlayTitle = document.getElementById('overlayTitle');
+    const overlaySubtitle = document.getElementById('overlaySubtitle');
+    const startOverlay = document.getElementById('startOverlay');
+    const autoplayToggle = document.getElementById('autoplayToggle');
+    const pillHint = document.getElementById('pillHint');
+    const showControlsBtn = document.getElementById('showControlsBtn');
+    const toast = document.getElementById('toast');
+
+    // Embed mode detection
+    const urlParams = new URLSearchParams(location.search);
+    const isEmbed = urlParams.get('embed') === '1';
+    const autoplayOnLoad = urlParams.get('autoplay') === '1';
+    document.body.classList.toggle('mode-embed', isEmbed);
+
+    // Embed control strip elements
+    const embedControls = document.getElementById('embedControls');
+    const embedPlayBtn = document.getElementById('embedPlayBtn');
+    const embedPrevBtn = document.getElementById('embedPrevBtn');
+    const embedNextBtn = document.getElementById('embedNextBtn');
+    const embedMuteBtn = document.getElementById('embedMuteBtn');
+    const embedRestartBtn = document.getElementById('embedRestartBtn');
+    const embedFullscreenBtn = document.getElementById('embedFullscreenBtn');
+    const embedSeek = document.getElementById('embedSeek');
+    const embedTime = document.getElementById('embedTime');
+
+    document.getElementById('pptxLink').href = `/decks/${deckId}/deck.pptx`;
+    document.getElementById('audioLink').href = `/decks/${deckId}/voiceover.mp3`;
+
+    // autoplay-on-load preference (localStorage, per-browser)
+    const AUTOPLAY_KEY = 'pdf2slides.autoplay';
+    const savedAutoplay = localStorage.getItem(AUTOPLAY_KEY);
+    if (savedAutoplay !== null) autoplayToggle.checked = savedAutoplay === '1';
+    autoplayToggle.addEventListener('change', () => {
+      localStorage.setItem(AUTOPLAY_KEY, autoplayToggle.checked ? '1' : '0');
+    });
+
+    const fmt = (s) => {
+      if (!isFinite(s)) return '0:00';
+      const m = Math.floor(s / 60);
+      const sec = Math.floor(s % 60);
+      return `${m}:${String(sec).padStart(2, '0')}`;
+    };
+
+    let render = null;
+    let timings = [];
+    let slideNodes = [];
+    let currentSlide = -1;
+    let hasInteracted = false;
+    let pillTimer = null;
+
+    function showToast(msg, ms = 1800) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => toast.classList.remove('show'), ms);
+    }
+
+    function markInteracted() {
+      if (hasInteracted) return;
+      hasInteracted = true;
+      pillHint.classList.add('hidden');
+      clearTimeout(pillTimer);
+    }
+
+    function showControlsBriefly() {
+      const t = document.body;
+      t.classList.add('show-controls-briefly');
+      clearTimeout(t._briefT);
+      t._briefT = setTimeout(() => t.classList.remove('show-controls-briefly'), 1500);
+    }
+
+    async function load() {
+      try {
+        const [rResp, mResp] = await Promise.all([
+          fetch(`/decks/${deckId}/render.json`),
+          fetch(`/api/decks/${deckId}/manifest`),
+        ]);
+        if (!rResp.ok) throw new Error('render.json missing');
+        if (!mResp.ok) throw new Error('manifest missing');
+        render = await rResp.json();
+        const manifest = await mResp.json();
+        timings = (manifest.slideTimings || []).map(t => ({ index: t.index, start: t.start, end: t.end }));
+        deckTitle.textContent = manifest.title || 'Slide viewer';
+        overlayTitle.textContent = manifest.title || 'Slide Presentation';
+        overlaySubtitle.textContent = `${manifest.slideCount || timings.length} slides · ${fmt((timings[timings.length - 1] || {}).end || 0)} · press play to start`;
+        audio.src = `/decks/${deckId}/voiceover.mp3`;
+
+        const total = timings.length ? timings[timings.length - 1].end : 0;
+        seek.max = total || 0;
+        totalTime.textContent = fmt(total);
+        audio.addEventListener('loadedmetadata', () => {
+          if (audio.duration && isFinite(audio.duration)) {
+            seek.max = audio.duration;
+            totalTime.textContent = fmt(audio.duration);
+            overlaySubtitle.textContent = `${manifest.slideCount || timings.length} slides · ${fmt(audio.duration)} · press play to start`;
+          }
+        });
+
+        renderSlides();
+        showSlide(0);
+        counter.textContent = `1 / ${slideNodes.length}`;
+
+        // Auto-dismiss the start overlay if the user has autoplay enabled.
+        // Browsers still require a user gesture to start audio, so we can't
+        // truly autoplay — we just skip the overlay and start when the user
+        // presses space or any key. If the URL has ?autoplay=1 we keep the
+        // overlay but show a hint to click.
+        if (isEmbed && autoplayOnLoad) {
+          // Best-effort autoplay: try to start silently (muted) so playback
+          // begins without a click. The embed code passes allow="autoplay",
+          // but Chrome may still block until a user gesture on the parent page.
+          audio.muted = true;
+          updateMuteBtn();
+          startPlayback();
+        } else if (autoplayToggle.checked) {
+          // Keep overlay; user still must click. We do highlight play button.
+          playBig.focus();
+        }
+      } catch (e) {
+        errorEl.style.display = 'block';
+        errorEl.textContent = 'Failed to load deck: ' + e.message;
+      }
+    }
+
+    function renderSlides() {
+      const mode = render.mode || 'composited';
+      if (mode === 'raster') {
+        // Raster mode: each slide is a pre-rendered PNG, fill the canvas.
+        for (const s of render.slides) {
+          const slideEl = document.createElement('div');
+          slideEl.className = 'slide';
+          const img = document.createElement('img');
+          img.src = `/decks/${deckId}/${s.src}`;
+          img.alt = 'Slide ' + s.index;
+          img.draggable = false;
+          img.style.position = 'absolute';
+          img.style.inset = '0';
+          img.style.width = '100%';
+          img.style.height = '100%';
+          img.style.objectFit = 'contain';
+          slideEl.appendChild(img);
+          canvas.appendChild(slideEl);
+          slideNodes.push(slideEl);
+        }
+        return;
+      }
+      // Composited (legacy) mode: position text+images from parsed PPTX data.
+      const { slideW, slideH, slides } = render;
+      for (const s of slides) {
+        const slideEl = document.createElement('div');
+        slideEl.className = 'slide';
+        for (const it of s.items) {
+          if (it.type === 'bg') {
+            const bg = document.createElement('div');
+            bg.className = 'bg';
+            bg.style.background = it.color;
+            slideEl.appendChild(bg);
+          } else if (it.type === 'text') {
+            const el = document.createElement('div');
+            el.className = 'item text' + (it.align === 'center' ? ' center' : it.align === 'right' ? ' right' : '') + (it.bold ? ' bold' : '');
+            el.style.left = (it.x / slideW * 100) + '%';
+            el.style.top = (it.y / slideH * 100) + '%';
+            el.style.width = (it.w / slideW * 100) + '%';
+            el.style.height = (it.h / slideH * 100) + '%';
+            const pt = it.fontSize || 18;
+            const vw = (pt / 72) * 13.333333;
+            el.style.fontSize = 'min(' + vw + 'vw, ' + (pt * 1.4) + 'px)';
+            el.style.lineHeight = '1.15';
+            if (it.color) el.style.color = it.color;
+            el.textContent = it.text;
+            slideEl.appendChild(el);
+          } else if (it.type === 'image' && it.src) {
+            const el = document.createElement('div');
+            el.className = 'item image';
+            el.style.left = (it.x / slideW * 100) + '%';
+            el.style.top = (it.y / slideH * 100) + '%';
+            el.style.width = (it.w / slideW * 100) + '%';
+            el.style.height = (it.h / slideH * 100) + '%';
+            const ext = it.src.split('.').pop().toLowerCase();
+            if (ext === 'svg') {
+              fetch(`/decks/${deckId}/${it.src}`).then(r => r.text()).then(svg => {
+                el.innerHTML = svg;
+                const svgEl = el.querySelector('svg');
+                if (svgEl) {
+                  svgEl.removeAttribute('width');
+                  svgEl.removeAttribute('height');
+                  svgEl.style.width = '100%';
+                  svgEl.style.height = '100%';
+                  svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+                }
+              });
+            } else {
+              const img = document.createElement('img');
+              img.src = `/decks/${deckId}/${it.src}`;
+              img.alt = '';
+              el.appendChild(img);
+            }
+            slideEl.appendChild(el);
+          }
+        }
+        canvas.appendChild(slideEl);
+        slideNodes.push(slideEl);
+      }
+    }
+
+    function findSlideIndex(t) {
+      if (!timings.length) return 0;
+      for (let i = 0; i < timings.length; i++) {
+        if (t >= timings[i].start && t < timings[i].end) return i;
+      }
+      if (t >= timings[timings.length - 1].end) return timings.length - 1;
+      return 0;
+    }
+
+    function updateEmbedTime() {
+      if (!embedTime) return;
+      const t = audio.currentTime || 0;
+      const total = (audio.duration && isFinite(audio.duration)) ? audio.duration : 0;
+      embedTime.textContent = `${fmt(t)} / ${fmt(total)}`;
+    }
+
+    function updateMuteBtn() {
+      if (!embedMuteBtn) return;
+      embedMuteBtn.textContent = audio.muted ? '🔇' : '🔊';
+      embedMuteBtn.title = audio.muted ? 'Unmute voiceover (M)' : 'Mute voiceover (M)';
+    }
+
+    function showSlide(i) {
+      if (i === currentSlide) return;
+      if (currentSlide >= 0 && slideNodes[currentSlide]) slideNodes[currentSlide].classList.remove('active');
+      currentSlide = Math.max(0, Math.min(i, slideNodes.length - 1));
+      if (slideNodes[currentSlide]) slideNodes[currentSlide].classList.add('active');
+      counter.textContent = `${currentSlide + 1} / ${slideNodes.length}`;
+    }
+
+    audio.addEventListener('timeupdate', () => {
+      const t = audio.currentTime;
+      if (!seek.dataset.dragging) seek.value = t;
+      curTime.textContent = fmt(t);
+      if (embedSeek && !embedSeek.dataset.dragging) embedSeek.value = t;
+      updateEmbedTime();
+      showSlide(findSlideIndex(t));
+    });
+
+    audio.addEventListener('ended', () => {
+      playBtn.textContent = '▶ Play';
+      playBig.textContent = '↺';
+      playBig.title = 'Restart';
+      if (embedPlayBtn) embedPlayBtn.textContent = '▶';
+      // Re-show the start overlay as a "finished" state
+      startOverlay.classList.remove('hidden');
+    });
+
+    function startPlayback() {
+      if (audio.ended) audio.currentTime = 0;
+      audio.play().then(() => {
+        playBtn.textContent = '⏸ Pause';
+        playBig.textContent = '⏸';
+        if (embedPlayBtn) embedPlayBtn.textContent = '⏸';
+        startOverlay.classList.add('hidden');
+        pillHint.classList.remove('hidden');
+        // Hide the pill after 4s of no interaction
+        clearTimeout(pillTimer);
+        pillTimer = setTimeout(() => pillHint.classList.add('hidden'), 4000);
+      }).catch((err) => {
+        showToast('Could not start audio: ' + err.message);
+      });
+    }
+
+    function pausePlayback() {
+      audio.pause();
+      playBtn.textContent = '▶ Play';
+      playBig.textContent = '▶';
+      if (embedPlayBtn) embedPlayBtn.textContent = '▶';
+    }
+
+    function togglePlay() {
+      if (audio.paused) startPlayback();
+      else pausePlayback();
+    }
+
+    playBtn.addEventListener('click', togglePlay);
+    playBig.addEventListener('click', () => { markInteracted(); togglePlay(); });
+    startOverlay.addEventListener('click', (e) => {
+      if (e.target === startOverlay) { markInteracted(); togglePlay(); }
+    });
+
+    document.getElementById('restartBtn').addEventListener('click', () => {
+      audio.currentTime = 0;
+      showSlide(0);
+      startPlayback();
+    });
+
+    document.getElementById('prevBtn').addEventListener('click', () => {
+      const i = findSlideIndex(audio.currentTime);
+      if (audio.currentTime - timings[i].start > 0.3) audio.currentTime = timings[i].start;
+      else if (i > 0) audio.currentTime = timings[i - 1].start;
+    });
+    document.getElementById('nextBtn').addEventListener('click', () => {
+      const i = findSlideIndex(audio.currentTime);
+      if (i < timings.length - 1) audio.currentTime = timings[i + 1].start;
+    });
+
+    seek.addEventListener('input', () => {
+      seek.dataset.dragging = '1';
+      audio.currentTime = parseFloat(seek.value);
+    });
+    seek.addEventListener('change', () => {
+      delete seek.dataset.dragging;
+    });
+
+    // ---------- Embed control strip ----------
+    function embedNext() {
+      const i = findSlideIndex(audio.currentTime);
+      if (i < timings.length - 1) audio.currentTime = timings[i + 1].start;
+    }
+    function embedPrev() {
+      const i = findSlideIndex(audio.currentTime);
+      if (audio.currentTime - timings[i].start > 0.3) audio.currentTime = timings[i].start;
+      else if (i > 0) audio.currentTime = timings[i - 1].start;
+    }
+    function embedRestart() {
+      audio.currentTime = 0;
+      showSlide(0);
+      startPlayback();
+    }
+    function embedFullscreen() {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen().catch(() => {});
+    }
+
+    if (isEmbed && embedControls) {
+      embedPlayBtn.addEventListener('click', () => { markInteracted(); togglePlay(); });
+      embedPrevBtn.addEventListener('click', () => { markInteracted(); embedPrev(); });
+      embedNextBtn.addEventListener('click', () => { markInteracted(); embedNext(); });
+      embedMuteBtn.addEventListener('click', () => {
+        markInteracted();
+        audio.muted = !audio.muted;
+        updateMuteBtn();
+      });
+      embedRestartBtn.addEventListener('click', () => { markInteracted(); embedRestart(); });
+      embedFullscreenBtn.addEventListener('click', () => { markInteracted(); embedFullscreen(); });
+
+      embedSeek.addEventListener('input', () => {
+        embedSeek.dataset.dragging = '1';
+        audio.currentTime = parseFloat(embedSeek.value);
+      });
+      embedSeek.addEventListener('change', () => {
+        delete embedSeek.dataset.dragging;
+      });
+
+      // Update the embed scrubber max once audio metadata is known.
+      const syncEmbedSeekMax = () => {
+        if (audio.duration && isFinite(audio.duration)) {
+          embedSeek.max = audio.duration;
+        }
+      };
+      if (audio.readyState >= 1) syncEmbedSeekMax();
+      audio.addEventListener('loadedmetadata', syncEmbedSeekMax);
+
+      updateMuteBtn();
+    }
+
+    // Clicking anywhere on the embed stage gives it focus so keyboard
+    // shortcuts (space, arrows, M, F) work without extra interaction.
+    if (isEmbed) {
+      embedControls.addEventListener('mousedown', (e) => e.preventDefault());
+      window.addEventListener('mousedown', () => document.body.focus());
+    }
+
+    // Mode toggle (presentation <-> editor)
+    function setMode(mode) {
+      document.body.classList.toggle('mode-editor', mode === 'editor');
+      document.body.classList.toggle('mode-presentation', mode === 'presentation');
+      // In presentation mode, fill the canvas; in editor, letterbox.
+      canvas.classList.toggle('fill', mode === 'presentation');
+      showControlsBtn.style.display = mode === 'presentation' ? 'block' : 'none';
+    }
+    setMode('presentation');
+
+    showControlsBtn.addEventListener('click', () => {
+      setMode('editor');
+      showToast('Editor mode · press C to return');
+      markInteracted();
+    });
+
+    // Keyboard
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      markInteracted();
+      if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+      else if (e.code === 'ArrowLeft') { e.preventDefault(); document.getElementById('prevBtn').click(); }
+      else if (e.code === 'ArrowRight') { e.preventDefault(); document.getElementById('nextBtn').click(); }
+      else if (e.code === 'KeyR') { e.preventDefault(); document.getElementById('restartBtn').click(); }
+      else if (e.code === 'KeyM') {
+        e.preventDefault();
+        if (isEmbed && embedMuteBtn) embedMuteBtn.click();
+        else {
+          audio.muted = !audio.muted;
+          updateMuteBtn();
+        }
+      }
+      else if (e.code === 'KeyC') {
+        e.preventDefault();
+        const isEditor = document.body.classList.contains('mode-editor');
+        setMode(isEditor ? 'presentation' : 'editor');
+        showToast(isEditor ? 'Presentation mode' : 'Editor mode');
+      }
+      else if (e.code === 'KeyF') {
+        e.preventDefault();
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen().catch(() => {});
+      }
+    });
+
+    // Click on the canvas in presentation mode also toggles play (handy for kiosks)
+    canvas.addEventListener('click', () => {
+      markInteracted();
+      togglePlay();
+    });
+
+    load();
+  </script>
+</body>
+</html>

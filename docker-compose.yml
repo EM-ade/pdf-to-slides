@@ -1,0 +1,62 @@
+version: '3.8'
+services:
+  presenton:
+    image: ghcr.io/presenton/presenton:latest
+    ports:
+      - "5001:80"
+    environment:
+      - LLM=custom
+      - CUSTOM_LLM_URL="https://api.commandcode.ai/provider/v1"
+      - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
+      - CUSTOM_MODEL=minimax/minimax-m3-free
+      - IMAGE_PROVIDER=pexels
+      - PEXELS_API_KEY=${PEXELS_API_KEY}
+      - CAN_CHANGE_KEYS=false
+      - DISABLE_AUTH=true
+    volumes:
+      - ./app_data:/app_data
+
+  app:
+    build: .
+    ports:
+      - "3005:3005"
+    environment:
+      - PRESENTON_URL=http://presenton:5001
+      - PORT=3005
+      - PPT_TEMPLATE=${PPT_TEMPLATE:-general}
+      - PPT_SLIDES=${PPT_SLIDES:-10}
+      - PPT_TONE=${PPT_TONE:-educational}
+      - PPT_LANGUAGE=${PPT_LANGUAGE:-English}
+      - PPT_VERBOSITY=${PPT_VERBOSITY:-standard}
+      - TTS_URL=${TTS_URL:-https://api.openai.com/v1/audio/speech}
+      - TTS_VOICE=${TTS_VOICE:-nova}
+      - TTS_MODEL=${TTS_MODEL:-tts-1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - presenton
+    volumes:
+      - ./app_data:/app_data
+
+  # Optional: local Kokoro TTS. Only needed if you set TTS_URL=http://tts:8880/v1/audio/speech
+  # instead of using OpenAI. Uncomment the block below AND add `tts` to `depends_on` above.
+  # tts:
+  #   image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+  #   ports:
+  #     - "8880:8880"
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 60s
+
+  # Build the slide renderer image (used on-demand via `docker run`, not as a
+  # long-running service). The Node app shells out to:
+  #   docker run --rm -v <decks-dir>:/work pdf2slides-renderer \
+  #     /work/<deckId>/deck.pptx /work/<deckId>/slides 150
+  renderer:
+    build: ./renderer
+    image: pdf2slides-renderer:latest
+    command: ["true"]  # one-shot; never actually runs
+    profiles: ["build-only"]
+    restart: "no"
