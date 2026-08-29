@@ -6,7 +6,7 @@ services:
       - "5001:80"
     environment:
       - LLM=custom
-      - CUSTOM_LLM_URL="https://api.commandcode.ai/provider/v1"
+      - CUSTOM_LLM_URL=https://api.commandcode.ai/provider/v1
       - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
       - CUSTOM_MODEL=deepseek/deepseek-v4-flash
       - IMAGE_PROVIDER=pexels
