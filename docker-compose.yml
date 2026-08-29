@@ -31,24 +31,27 @@ services:
       - TTS_URL=${TTS_URL:-https://api.openai.com/v1/audio/speech}
       - TTS_VOICE=${TTS_VOICE:-nova}
       - TTS_MODEL=${TTS_MODEL:-tts-1}
+      - TTS_CONCURRENCY=${TTS_CONCURRENCY:-6}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - presenton
+      - tts
     volumes:
       - ./app_data:/app_data
 
-  # Optional: local Kokoro TTS. Only needed if you set TTS_URL=http://tts:8880/v1/audio/speech
-  # instead of using OpenAI. Uncomment the block below AND add `tts` to `depends_on` above.
-  # tts:
-  #   image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
-  #   ports:
-  #     - "8880:8880"
-  #   healthcheck:
-  #     test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 5
-  #     start_period: 60s
+  # Local Kokoro TTS (free, self-hosted). Uses TTS_URL=http://tts:8880/v1/audio/speech.
+  # CPU image: ~4-6 min for 10 slides. For faster, use the GPU image on a CUDA host:
+  #   ghcr.io/remsky/kokoro-fastapi-gpu:latest
+  tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    ports:
+      - "8880:8880"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # Build the slide renderer image (used on-demand via `docker run`, not as a
   # long-running service). The Node app shells out to:
