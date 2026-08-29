@@ -48,7 +48,7 @@ docker run -d --name presenton -p 5001:80 `
   -e LLM="custom" `
   -e CUSTOM_LLM_URL="https://api.commandcode.ai/provider/v1" `
   -e CUSTOM_LLM_API_KEY="<your-commandcode-key>" `
-  -e CUSTOM_MODEL="xiaomi/mimo-v2.5" `
+  -e CUSTOM_MODEL="deepseek/deepseek-v4-flash" `
   -e IMAGE_PROVIDER="pexels" `
   -e PEXELS_API_KEY="<your-pexels-key>" `
   -e CAN_CHANGE_KEYS="false" `

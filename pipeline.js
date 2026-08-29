@@ -254,7 +254,7 @@ function slideNarrationText(slide, fallbackTitle) {
 async function rewriteSlidesForClarity(slides) {
   const apiKey = process.env.CUSTOM_LLM_API_KEY;
   const baseUrl = (process.env.CUSTOM_LLM_URL || 'https://api.commandcode.ai/provider/v1').replace(/\/+$/, '');
-  const model = process.env.CUSTOM_MODEL || 'xiaomi/mimo-v2.5';
+  const model = process.env.CUSTOM_MODEL || 'deepseek/deepseek-v4-flash';
   if (!apiKey) throw new Error('CUSTOM_LLM_API_KEY not set; cannot rewrite slides');
 
   // Collect all text items, sending their text + a stable id so the LLM can
@@ -349,7 +349,7 @@ Rules:
 async function rewriteNarrationForStudents(slides) {
   const apiKey = process.env.CUSTOM_LLM_API_KEY;
   const baseUrl = (process.env.CUSTOM_LLM_URL || 'https://api.commandcode.ai/provider/v1').replace(/\/+$/, '');
-  const model = process.env.CUSTOM_MODEL || 'xiaomi/mimo-v2.5';
+  const model = process.env.CUSTOM_MODEL || 'deepseek/deepseek-v4-flash';
   if (!apiKey) throw new Error('CUSTOM_LLM_API_KEY not set; cannot rewrite narration');
 
   const systemPrompt = `You are rewriting presenter notes from a slide deck into a narration script that will be read aloud by a text-to-speech voice.
