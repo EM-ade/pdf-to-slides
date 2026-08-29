@@ -350,7 +350,11 @@
       status.innerHTML = `<span class="spinner"></span>${deckText}`;
 
       try {
-        const response = await fetch(`/api/upload${wantVoiceover ? '?voiceover=1' : ''}&slides=${slidesParam}`, {
+        const params = new URLSearchParams();
+        if (wantVoiceover) params.set('voiceover', '1');
+        params.set('slides', String(slidesParam));
+        const query = params.toString();
+        const response = await fetch(`/api/upload${query ? '?' + query : ''}`, {
           method: 'POST',
           body: formData
         });
