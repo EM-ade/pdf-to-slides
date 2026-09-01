@@ -32,6 +32,8 @@ services:
       - TTS_VOICE=${TTS_VOICE:-nova}
       - TTS_MODEL=${TTS_MODEL:-tts-1}
       - TTS_CONCURRENCY=${TTS_CONCURRENCY:-6}
+      - NARRATION_REWRITE=${NARRATION_REWRITE:-0}
+      - SLIDES_REWRITE=${SLIDES_REWRITE:-0}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - presenton
