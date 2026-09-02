@@ -666,7 +666,6 @@ async function generateVoiceover(slides, deckDir) {
         const target = new URL(DEEPGRAM_URL);
         target.searchParams.set('model', DEEPGRAM_VOICE);
         target.searchParams.set('encoding', 'mp3');
-        target.searchParams.set('sample_rate', '24000');
         resp = await fetch(target.toString(), {
           method: 'POST',
           headers: {
