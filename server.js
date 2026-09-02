@@ -4,6 +4,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const archiver = require('archiver');
 const { processPDF, processContent } = require('./pipeline');
 
@@ -143,6 +144,69 @@ function writeDeckStatus(deckId, status, extra) {
   } catch (_) { /* non-fatal */ }
 }
 
+// Per-deck metadata file that records the source PDF hash + requested params
+// so repeat uploads of the same PDF can be served from cache (Step 5.2).
+function writePdfMeta(deckId, pdfHash, params) {
+  try {
+    const deckDir = path.join(decksDir, deckId);
+    fs.writeFileSync(
+      path.join(deckDir, 'pdf-hash.json'),
+      JSON.stringify({ deckId, pdfHash, params: params || {}, createdAt: new Date().toISOString() }, null, 2)
+    );
+  } catch (_) { /* non-fatal */ }
+}
+
+// Reads every deck's pdf-hash.json looking for a deck that was generated from
+// the same PDF hash AND the same requested slides/voiceover params. Returns the
+// matching deckId or null. Completed decks only (must have manifest.json).
+function findCachedDeck(pdfHash, params) {
+  if (!pdfHash) return null;
+  let entries;
+  try {
+    entries = fs.readdirSync(decksDir, { withFileTypes: true });
+  } catch (_) {
+    return null;
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const deckDir = path.join(decksDir, ent.name);
+    const metaPath = path.join(deckDir, 'pdf-hash.json');
+    if (!fs.existsSync(metaPath)) continue;
+    if (!fs.existsSync(path.join(deckDir, 'manifest.json'))) continue;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (!meta.pdfHash || meta.pdfHash !== pdfHash) continue;
+      if (!sameParams(meta.params, params)) continue;
+      return ent.name;
+    } catch (_) { /* malformed meta — ignore */ }
+  }
+  return null;
+}
+
+function sameParams(a, b) {
+  const ak = a || {};
+  const bk = b || {};
+  for (const key of ['slides', 'voiceover']) {
+    const av = ak[key];
+    const bv = bk[key];
+    const norm = (v) => (v === true || v === '1' || v === 1 ? '1' : v === false || v === '0' || v === 0 ? '0' : v === undefined || v === null || v === '' ? '' : String(v));
+    if (norm(av) !== norm(bv)) return false;
+  }
+  return true;
+}
+
+// Compute a cheap content hash for an uploaded PDF: sha256 over the whole
+// file streamed in chunks. Fast enough even for large PDFs.
+async function hashPdfFile(pdfPath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(pdfPath);
+    stream.on('data', (d) => hash.update(d));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
+
 // Upload endpoint — Presenton ~30-90s, TTS ~3-5x realtime on CPU.
 // Default 10-min timeout. Set REQUEST_TIMEOUT_MS=... to override.
 app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) => {
@@ -216,9 +280,41 @@ app.post('/api/upload-async', requireApiToken, upload.single('pdf'), async (req,
     }
   }
 
+  // Resolve the effective slide count (same logic as processPDF) so the cache
+  // key stays accurate if PPT_SLIDES changes between uploads.
+  const effectiveSlides = slides || Math.max(1, parseInt(process.env.PPT_SLIDES || '10', 10) || 10);
+  const cacheParams = {
+    slides: String(effectiveSlides),
+    voiceover: wantVoiceover ? '1' : '0',
+  };
+
+  // PDF-hash cache (Step 5.2): if the same PDF was already turned into a
+  // completed deck with identical slides/voiceover params, return that deckId
+  // instantly instead of regenerating.
+  let pdfHash = null;
+  try {
+    pdfHash = await hashPdfFile(req.file.path);
+  } catch (e) {
+    console.warn('[async] pdf hash failed, cache disabled for this upload:', e.message);
+  }
+  if (pdfHash) {
+    const cached = findCachedDeck(pdfHash, cacheParams);
+    if (cached) {
+      fs.unlinkSync(req.file.path);
+      return res.json({
+        success: true,
+        deckId: cached,
+        cached: true,
+        status: 'completed',
+        pollUrl: `/api/decks/${cached}/status`,
+      });
+    }
+  }
+
   const deckId = uuidv4();
   const pdfPath = req.file.path;
   writeDeckStatus(deckId, 'queued', { filename: req.file.originalname });
+  if (pdfHash) writePdfMeta(deckId, pdfHash, cacheParams);
 
   // Respond immediately — the deck is now owned by the background task.
   res.status(202).json({
@@ -232,18 +328,20 @@ app.post('/api/upload-async', requireApiToken, upload.single('pdf'), async (req,
   // The single-threaded event loop means only one deck is actually
   // processed at a time; extra queued jobs wait their turn naturally.
   (async () => {
+    const t0 = Date.now();
+    const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
     try {
       writeDeckStatus(deckId, 'processing', { filename: req.file.originalname });
-      console.log(`[async] Processing PDF: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
+      console.log(`[async] Start ${deckId}: ${req.file.originalname}${wantVoiceover ? ' (voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
       const manifest = await runPipeline(pdfPath, deckId, {
         voiceover: wantVoiceover,
         slides,
       });
       fs.unlinkSync(pdfPath);
       writeDeckStatus(deckId, 'completed');
-      console.log(`[async] Deck ready: ${deckId}`);
+      console.log(`[async] Done ${deckId} in ${ts()} (${manifest.slideCount} slides${manifest.voiceoverUrl ? ', voiceover' : ''})`);
     } catch (error) {
-      console.error(`[async] Processing error for ${deckId}:`, error);
+      console.error(`[async] Error ${deckId} after ${ts()}:`, error);
       if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
       writeDeckStatus(deckId, 'failed', { error: error.message || 'Failed to process PDF' });
     }

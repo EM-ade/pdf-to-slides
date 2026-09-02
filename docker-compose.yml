@@ -28,24 +28,29 @@ services:
       - PPT_TONE=${PPT_TONE:-educational}
       - PPT_LANGUAGE=${PPT_LANGUAGE:-English}
       - PPT_VERBOSITY=${PPT_VERBOSITY:-concise}
+      - TTS_PROVIDER=${TTS_PROVIDER:-deepgram}
       - TTS_URL=${TTS_URL:-https://api.openai.com/v1/audio/speech}
       - TTS_VOICE=${TTS_VOICE:-nova}
       - TTS_MODEL=${TTS_MODEL:-tts-1}
-      - TTS_CONCURRENCY=${TTS_CONCURRENCY:-6}
+      - TTS_CONCURRENCY=${TTS_CONCURRENCY:-8}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - DEEPGRAM_VOICE=${DEEPGRAM_VOICE:-aura-2-thalia-en}
       - NARRATION_REWRITE=${NARRATION_REWRITE:-0}
       - SLIDES_REWRITE=${SLIDES_REWRITE:-0}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - presenton
-      - tts
     volumes:
       - ./app_data:/app_data
 
-  # Local Kokoro TTS (free, self-hosted). Uses TTS_URL=http://tts:8880/v1/audio/speech.
-  # CPU image: ~4-6 min for 10 slides. For faster, use the GPU image on a CUDA host:
-  #   ghcr.io/remsky/kokoro-fastapi-gpu:latest
+  # Local Kokoro TTS (free, self-hosted). Uses TTS_PROVIDER=kokoro +
+  # TTS_URL=http://tts:8880/v1/audio/speech. Optional: enabled only with
+  # `docker compose --profile kokoro up`. Not depended on by the app, so a
+  # Kokoro outage can never block startup. CPU image is ~2GB and slow;
+  # Deepgram Aura (TTS_PROVIDER=deepgram) is the recommended provider.
   tts:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    profiles: ["kokoro"]
     ports:
       - "8880:8880"
     healthcheck:

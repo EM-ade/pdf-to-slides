@@ -3,7 +3,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile, spawnSync } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const JSZip = require('jszip');
 
@@ -11,11 +11,22 @@ const SLIDE_W = 12192000;
 const SLIDE_H = 6858000;
 
 const PRESENTON_URL = (process.env.PRESENTON_URL || 'http://localhost:5001').replace(/\/+$/, '');
+// TTS provider switch: 'openai' (default, OpenAI-compatible schema), 'deepgram'
+// (Deepgram Aura REST API), 'kokoro' (self-hosted, OpenAI-compatible schema).
+const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
 const TTS_URL = (process.env.TTS_URL || 'https://api.openai.com/v1/audio/speech').replace(/\/+$/, '');
 const TTS_VOICE = process.env.TTS_VOICE || 'nova';
 const TTS_MODEL = process.env.TTS_MODEL || 'tts-1';
 const TTS_API_KEY = process.env.OPENAI_API_KEY || process.env.TTS_API_KEY || '';
 const TTS_CONCURRENCY = Math.max(1, parseInt(process.env.TTS_CONCURRENCY || '6', 10));
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
+const DEEPGRAM_URL = (process.env.DEEPGRAM_URL || 'https://api.deepgram.com/v1/speak').replace(/\/+$/, '');
+const DEEPGRAM_VOICE = process.env.DEEPGRAM_VOICE || 'aura-2-thalia-en';
+
+// Human-readable elapsed time since t0 (ms) for per-stage pipeline logging.
+function elapsedSince(t0) {
+  return `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+}
 
 const TEMPLATE = process.env.PPT_TEMPLATE || 'general';
 const N_SLIDES = parseInt(process.env.PPT_SLIDES || '10', 10);
@@ -27,6 +38,24 @@ const INCLUDE_TOC = (process.env.PPT_INCLUDE_TOC || 'false').toLowerCase() === '
 
 function pickLib(parsedUrl) {
   return parsedUrl.protocol === 'http:' ? http : https;
+}
+
+// Promise wrapper around execFile so long child processes (LibreOffice render)
+// don't block the event loop and can overlap async TTS requests.
+function execFileAsync(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      if (error) {
+        // Prefer the child's own diagnostic output when available.
+        const detail = String(stderr || error.stderr || error.message || '').trim().slice(0, 500);
+        const err = new Error(detail || `${file} failed: ${error.message}`);
+        err.code = error.code;
+        err.exitCode = error.code === 'ETIMEDOUT' ? null : (error.status !== undefined ? error.status : error.code);
+        return reject(err);
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 function postMultipart(targetUrl, filePath, fieldName = 'file') {
@@ -612,7 +641,6 @@ function decodeXml(s) {
 }
 
 // Probe an audio file's duration in seconds using ffmpeg.
-const { spawnSync } = require('child_process');
 function probeAudioDurationSeconds(filePath) {
   const r = spawnSync(ffmpegPath, ['-i', filePath, '-f', 'null', '-'], { encoding: 'utf8' });
   const m = (r.stderr || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
@@ -627,20 +655,47 @@ async function generateVoiceover(slides, deckDir) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
     try {
-      const headers = { 'Content-Type': 'application/json' };
-      if (TTS_API_KEY) headers['Authorization'] = `Bearer ${TTS_API_KEY}`;
-      const resp = await fetch(TTS_URL, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: TTS_MODEL,
-          input: text,
-          voice: TTS_VOICE,
-          response_format: 'mp3',
-          speed: 1.0,
-        }),
-        signal: controller.signal,
-      });
+      let resp;
+      if (TTS_PROVIDER === 'deepgram') {
+        if (!DEEPGRAM_API_KEY) {
+          throw new Error('TTS_PROVIDER=deepgram requires DEEPGRAM_API_KEY to be set');
+        }
+        // Deepgram is NOT OpenAI-schema compatible: model/voice go on the URL as
+        // query params and the body is just { "text": ... }; the response is raw
+        // audio bytes.
+        const target = new URL(DEEPGRAM_URL);
+        target.searchParams.set('model', DEEPGRAM_VOICE);
+        target.searchParams.set('encoding', 'mp3');
+        target.searchParams.set('sample_rate', '24000');
+        resp = await fetch(target.toString(), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+          },
+          body: JSON.stringify({ text }),
+          signal: controller.signal,
+        });
+        if (resp.status === 401) {
+          throw new Error('Deepgram auth failed (HTTP 401): check DEEPGRAM_API_KEY');
+        }
+      } else {
+        // 'openai' (default) and 'kokoro' both speak the OpenAI-compatible schema.
+        const headers = { 'Content-Type': 'application/json' };
+        if (TTS_API_KEY) headers['Authorization'] = `Bearer ${TTS_API_KEY}`;
+        resp = await fetch(TTS_URL, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model: TTS_MODEL,
+            input: text,
+            voice: TTS_VOICE,
+            response_format: 'mp3',
+            speed: 1.0,
+          }),
+          signal: controller.signal,
+        });
+      }
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => '');
         throw new Error(`TTS HTTP ${resp.status}: ${errBody.slice(0, 200)}`);
@@ -663,6 +718,8 @@ async function generateVoiceover(slides, deckDir) {
         return await ttsOnce(text);
       } catch (e) {
         lastErr = e;
+        // Auth errors won't recover on retry — fail fast with the clear message.
+        if (/401|DEEPGRAM_API_KEY/i.test(e.message)) throw e;
         if (attempt === 2) break;
         await new Promise((r) => setTimeout(r, 1500));
       }
@@ -743,7 +800,8 @@ async function generateVoiceover(slides, deckDir) {
   }
 
   const stat = fs.statSync(outPath);
-  console.log(`        voiceover.mp3 (${stat.size} bytes, voice=${TTS_VOICE}, concurrency=${TTS_CONCURRENCY}, total=${cursor.toFixed(1)}s)`);
+  const voiceLabel = TTS_PROVIDER === 'deepgram' ? DEEPGRAM_VOICE : TTS_VOICE;
+  console.log(`        voiceover.mp3 (${stat.size} bytes, provider=${TTS_PROVIDER}, voice=${voiceLabel}, concurrency=${TTS_CONCURRENCY}, total=${cursor.toFixed(1)}s)`);
   return { path: outPath, timings };
 }
 
@@ -752,7 +810,6 @@ async function generateVoiceover(slides, deckDir) {
 // (npm run build:renderer). Throws if the image is missing or docker fails.
 // Returns { slideW, slideH, slides: [{ index, src }] }
 async function renderSlidesViaLibreOffice(pptxPath, deckDir) {
-  const { spawnSync } = require('child_process');
   const deckName = path.basename(deckDir);
   const pptxName = path.basename(pptxPath);
   const slidesDir = path.join(deckDir, 'slides');
@@ -770,17 +827,13 @@ async function renderSlidesViaLibreOffice(pptxPath, deckDir) {
   const outArg = `/work/${deckName}/slides`;
 
   console.log(`        rendering via docker: ${pptxName} → slides/`);
-  const r = spawnSync('docker', [
+  // Async exec so the event loop stays free for parallel TTS requests.
+  await execFileAsync('docker', [
     'run', '--rm',
     '-v', volArg,
     'pdf2slides-renderer:latest',
     inArg, outArg, '150',
-  ], { stdio: 'pipe', timeout: 120000, encoding: 'utf8' });
-
-  if (r.status !== 0) {
-    const err = (r.stderr || r.stdout || '').trim().slice(0, 500);
-    throw new Error(`docker render failed (exit ${r.status}): ${err}`);
-  }
+  ], { timeout: 180000 });
 
   // Read produced PNGs
   const pngs = fs.readdirSync(slidesDir)
@@ -805,10 +858,11 @@ async function renderSlidesViaLibreOffice(pptxPath, deckDir) {
 }
 
 async function processPDF(pdfPath, deckDir, options = {}) {
+  const t0 = Date.now();
   const wantVoiceover = options.voiceover === true;
   // Per-request slide count override (defaults to env PPT_SLIDES).
   const nSlides = Math.max(1, parseInt(options.slides, 10) || N_SLIDES);
-  console.log('  [1/4] Uploading PDF to Presenton...');
+  console.log('  [1/5] Uploading PDF to Presenton...');
   const uploadUrl = `${PRESENTON_URL}/api/v1/ppt/files/upload`;
   const uploaded = await postMultipart(uploadUrl, pdfPath, 'files');
   let fileId;
@@ -842,7 +896,7 @@ async function processPDF(pdfPath, deckDir, options = {}) {
   }
   console.log(`        file_id: ${fileId}`);
 
-  console.log('  [2/4] Generating presentation...');
+  console.log(`  [2/5] Generating presentation... (${elapsedSince(t0)} elapsed)`);
   const generateUrl = `${PRESENTON_URL}/api/v1/ppt/presentation/generate`;
   const payload = {
     content: 'Generate a professional presentation from this document.',
@@ -884,7 +938,7 @@ async function processPDF(pdfPath, deckDir, options = {}) {
   console.log(`        presentation_id: ${presentationId}`);
   console.log(`        remote path: ${outputRemote}`);
 
-  console.log('  [3/4] Fetching .pptx into deck folder...');
+  console.log(`  [3/5] Fetching .pptx into deck folder... (${elapsedSince(t0)} elapsed)`);
   const pptxPath = path.join(deckDir, 'deck.pptx');
 
   // Try the shared-volume path first (works when ./app_data is mounted into
@@ -916,13 +970,16 @@ async function processPDF(pdfPath, deckDir, options = {}) {
   const stats = fs.statSync(pptxPath);
   console.log(`        saved: ${pptxPath} (${stats.size} bytes)`);
 
-  return finalizeDeck(deckDir, pptxPath, {
+  console.log(`  [4/5] Finalizing deck (voiceover/render)... (${elapsedSince(t0)} elapsed)`);
+  const manifest = await finalizeDeck(deckDir, pptxPath, {
     title: path.basename(outputRemote, path.extname(outputRemote)),
     slideCount: nSlides,
     presentationId,
     template: TEMPLATE,
     wantVoiceover,
   });
+  console.log(`  [5/5] Done. Total ${elapsedSince(t0)}`);
+  return manifest;
 }
 
 // Shared tail of the pipeline: voiceover generation (optional), slide
@@ -940,8 +997,17 @@ async function finalizeDeck(deckDir, pptxPath, opts) {
     generatedAt: new Date().toISOString(),
   };
 
-  if (opts.wantVoiceover) {
-    console.log('  [4/5] Generating voiceover...');
+  const t0 = Date.now();
+
+  // The voiceover chain (fetch notes -> optional narration rewrite -> TTS)
+  // and the render chain (raster or text-composited) only both depend on the
+  // .pptx, so run them concurrently. Whichever finishes first logs its stage;
+  // both write only their own files, so there is no shared-state hazard.
+  // Neither runs when voiceover is off (render.json only feeds the voiceover
+  // viewer, so non-voiceover decks skip it as before).
+  const voiceoverPromise = (async () => {
+    if (!opts.wantVoiceover) return;
+    console.log('  [voiceover] Fetching slide notes...');
     let slides = [];
     try {
       slides = await fetchSlides(opts.presentationId);
@@ -971,9 +1037,13 @@ async function finalizeDeck(deckDir, pptxPath, opts) {
     manifest.voiceoverBytes = vstats.size;
     manifest.voiceoverSlides = slides.length;
     manifest.slideTimings = voiceover.timings;
+    console.log(`  [voiceover] done (${elapsedSince(t0)} elapsed)`);
+  })();
 
-    console.log('  [5/5] Extracting slide render data for browser viewer...');
+  const renderPromise = (async () => {
+    if (!opts.wantVoiceover) return;
     let renderObj = null;
+    console.log('  [render] Extracting slide render data for browser viewer...');
     try {
       // Try raster rendering first (pixel-perfect via LibreOffice).
       // Falls back to text-compositing if the renderer image isn't built
@@ -1009,10 +1079,13 @@ async function finalizeDeck(deckDir, pptxPath, opts) {
         JSON.stringify(renderObj, null, 2)
       );
       manifest.viewerUrl = `/decks/${path.basename(deckDir)}/view`;
+      console.log(`  [render] done (${elapsedSince(t0)} elapsed)`);
     } catch (e) {
       console.log(`        could not extract render data: ${e.message}`);
     }
-  }
+  })();
+
+  await Promise.all([voiceoverPromise, renderPromise]);
 
   fs.writeFileSync(path.join(deckDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
@@ -1026,8 +1099,9 @@ async function finalizeDeck(deckDir, pptxPath, opts) {
 // processPDF: fetch pptx -> voiceover -> render -> manifest.
 async function processContent(contentInput, deckDir, options = {}) {
   const wantVoiceover = options.voiceover === true;
+  const t0 = Date.now();
 
-  console.log('  [1/3] Generating presentation from content...');
+  console.log(`  [1/4] Generating presentation from content...`);
   const generateUrl = `${PRESENTON_URL}/api/v1/ppt/presentation/generate`;
   const nSlides = Math.max(1, parseInt(options.slides, 10) || N_SLIDES);
   const template = options.template || TEMPLATE;
@@ -1088,7 +1162,7 @@ async function processContent(contentInput, deckDir, options = {}) {
   console.log(`        presentation_id: ${presentationId}`);
   console.log(`        remote path: ${outputRemote}`);
 
-  console.log('  [2/3] Fetching .pptx into deck folder...');
+  console.log(`  [2/4] Fetching .pptx into deck folder... (${elapsedSince(t0)} elapsed)`);
   const pptxPath = path.join(deckDir, 'deck.pptx');
   const localSource = resolvePresentonPath(outputRemote);
   let copied = false;
@@ -1117,14 +1191,16 @@ async function processContent(contentInput, deckDir, options = {}) {
     : String(contentInput || '');
   const title = rawTitle.replace(/[|#*\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Presentation';
 
-  console.log('  [3/3] Finalizing deck...');
-  return finalizeDeck(deckDir, pptxPath, {
+  console.log(`  [3/4] Finalizing deck (voiceover/render)... (${elapsedSince(t0)} elapsed)`);
+  const manifest = await finalizeDeck(deckDir, pptxPath, {
     title,
     slideCount,
     presentationId,
     template,
     wantVoiceover,
   });
+  console.log(`  [4/4] Done. Total ${elapsedSince(t0)}`);
+  return manifest;
 }
 
 module.exports = { processPDF, processContent };

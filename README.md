@@ -67,29 +67,29 @@ npm start
 # 5. Open http://localhost:3005 and upload a PDF
 ```
 
-Or, with `docker compose` (brings up Presenton **and** the Kokoro TTS service **and** the app together):
+Or, with `docker compose` (brings up Presenton **and** the app together):
 
 ```powershell
 docker compose up --build
 ```
 
-This starts three services:
+This starts two services by default:
 - `presenton` on `http://localhost:5001` (the slides generator)
-- `tts` on `http://localhost:8880` (Kokoro-FastAPI, voiceover)
 - `app` on `http://localhost:3005` (this Node frontend)
 
-When using compose, the app talks to Presenton at `http://presenton`
-(via the internal Docker network, port 80). `PRESENTON_URL` is set automatically in
-`docker-compose.yml`. TTS defaults to **OpenAI TTS** (cloud, ~$0.045 per
-10-slide deck) so there's no local TTS container. The Kokoro container
-is included in the compose file as commented-out YAML; uncomment it if
-you want to self-host TTS instead.
+The `tts` service (Kokoro-FastAPI) is optional and profile-gated:
+`docker compose --profile kokoro up`. When using compose, the app talks to
+Presenton at `http://presenton` (via the internal Docker network, port 80).
+`PRESENTON_URL` is set automatically in `docker-compose.yml`. TTS defaults to
+**Deepgram Aura** (hosted, fast, $200 free credit) — set `DEEPGRAM_API_KEY`
+in `.env`. Set `TTS_PROVIDER=openai` to use OpenAI TTS instead, or
+`TTS_PROVIDER=kokoro` + the `kokoro` profile to self-host.
 
 ## How to use
 
 1. Open `http://localhost:3005`
 2. Drop a PDF in the upload zone (50 MB max)
-3. Wait 30-90 seconds for slides, plus ~1-2 minutes if voiceover is enabled
+3. Wait 30-90 seconds for slides, plus ~10-60 seconds if voiceover is enabled (Deepgram TTS)
 4. Click **Download .pptx** (or **Download .zip (slides + audio)** if voiceover is on)
 5. Open in PowerPoint, Google Slides, or Keynote -- fully editable
 
@@ -207,11 +207,14 @@ All settings live in `.env`:
 | Variable            | Default                  | Notes |
 |---------------------|--------------------------|-------|
 | `PRESENTON_URL`     | `http://localhost:5001`  | Where Presenton is reachable. Inside Docker Compose this is `http://presenton` (port 80) |
-| `TTS_URL`           | `https://api.openai.com/v1/audio/speech` | Any OpenAI-compatible TTS endpoint |
+| `TTS_PROVIDER`      | `deepgram` (compose)     | `deepgram` (recommended), `openai`, or `kokoro` |
+| `DEEPGRAM_API_KEY`  | (none)                   | Required when `TTS_PROVIDER=deepgram`. https://console.deepgram.com ($200 free credit) |
+| `DEEPGRAM_VOICE`    | `aura-2-thalia-en`       | Deepgram Aura-2 voice/model id |
+| `TTS_URL`           | `https://api.openai.com/v1/audio/speech` | Any OpenAI-compatible TTS endpoint (used for `openai`/`kokoro`) |
 | `TTS_VOICE`         | `nova`                   | OpenAI: `alloy`/`nova`/`shimmer`/`onyx`/etc. Kokoro: `af_heart`/`af_bella`/etc. |
 | `TTS_MODEL`         | `tts-1`                  | `tts-1` (fast) or `tts-1-hd` (higher quality, same price) |
-| `OPENAI_API_KEY`    | (none)                   | Required when `TTS_URL` is OpenAI. New accounts get $5 free credit (~111 decks) |
-| `TTS_CONCURRENCY`   | `6`                      | Parallel TTS requests while generating voiceover |
+| `OPENAI_API_KEY`    | (none)                   | Required when `TTS_PROVIDER=openai` |
+| `TTS_CONCURRENCY`   | `8`                      | Parallel TTS requests while generating voiceover |
 | `PPT_TEMPLATE`      | `general`                | One of Presenton's built-in templates |
 | `PPT_SLIDES`        | `10`                     | Target slide count |
 | `PPT_TONE`          | `educational`            | `educational`, `professional`, `casual`, etc. |
@@ -250,38 +253,50 @@ slides. Add the key to enable stock photos.
 **Generation takes longer than 5 minutes**
 
 The Express timeout defaults to 10 minutes (`REQUEST_TIMEOUT_MS=600000`).
-Presenton is typically 30-90s; voiceover adds another 1-2 min on the CPU
-Kokoro image. Very large PDFs (200+ pages) can take a few minutes. Bump
-`REQUEST_TIMEOUT_MS` if you need more headroom.
+Presenton is typically 30-90s; Deepgram voiceover adds ~10-60s. Very large
+PDFs (200+ pages) can take a few minutes. Bump `REQUEST_TIMEOUT_MS` if you
+need more headroom. For long pipelines prefer `POST /api/upload-async`
+(submit-then-poll) — it returns a `deckId` in ~100ms so no host timeout
+applies.
 
 **First Presenton pull is 2GB**
 
 Expected. The image caches locally after the first pull.
 
-**Voiceover step fails with `TTS HTTP 401`**
+**Voiceover step fails with `Deepgram auth failed (HTTP 401)`**
+
+The `DEEPGRAM_API_KEY` is missing or invalid (and `TTS_PROVIDER=deepgram`).
+Create a key at https://console.deepgram.com, set it in `.env`, restart the
+server. The pipeline fails fast on 401 instead of retrying.
+
+**Voiceover step fails with `TTS HTTP 401` (OpenAI provider)**
 
 The `OPENAI_API_KEY` is missing or invalid. Create a key at
 https://platform.openai.com/api-keys, set it in `.env`, restart the
-server. New accounts get $5 of free credit, valid 3 months.
+server.
 
 **Voiceover step fails with `TTS HTTP 429` (rate limit)**
 
-OpenAI rate-limits per-organization. Lower `TTS_CONCURRENCY` in `.env`
-to 2-3 and retry. Paid accounts have higher limits; the free tier
-is throttled to ~3-5 req/min for TTS specifically.
+Deepgram/OpenAI rate-limit per account. Lower `TTS_CONCURRENCY` in `.env`
+to 2-3 and retry.
 
 **Voiceover step fails with `TTS HTTP 5xx`**
 
-Transient OpenAI outage. The pipeline retries each slide once; if it
-still fails, retry the upload. Check https://status.openai.com for
-incidents.
+Transient TTS outage. The pipeline retries each slide once; if it
+still fails, retry the upload.
 
-**Want to self-host TTS instead of OpenAI**
+**Want to self-host TTS instead of Deepgram/OpenAI (Kokoro)**
 
-Uncomment the `tts:` block in `docker-compose.yml` and re-add `tts` to
-the `app` service's `depends_on`. Then set in `.env`:
+Enable the profile-gated `tts:` service and re-add it as the provider:
+
+```powershell
+docker compose --profile kokoro up
+```
+
+Then set in `.env`:
 
 ```
+TTS_PROVIDER=kokoro
 TTS_URL=http://tts:8880/v1/audio/speech
 TTS_VOICE=af_heart
 TTS_CONCURRENCY=4
@@ -312,7 +327,8 @@ https://github.com/presenton/presenton. Requires Python 3.11 + `uv`.
 - Both services share `./app_data` as a volume. Presenton writes the
   generated `.pptx` there; Express copies it into `./decks/<uuid>/` so
   it can be served as a static file.
-- No cloud services are used beyond the user's own Command Code + Pexels keys.
+- Voiceover goes to Deepgram Aura by default (`TTS_PROVIDER=deepgram`);
+  OpenAI and self-hosted Kokoro are supported via `TTS_PROVIDER`.
 - The app is single-user / demo-grade. No rate limiting, no auth, no
   cleanup of old decks.
 
