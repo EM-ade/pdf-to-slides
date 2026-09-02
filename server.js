@@ -94,6 +94,55 @@ app.get('/decks/:deckId/view', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'viewer.html'));
 });
 
+// Shared pipeline runner for both the synchronous /api/upload and the
+// async /api/upload-async endpoints. Handles the PDF → deck pipeline,
+// optional voiceover zip, and writing manifest.json / deck files.
+// Returns the deckId on success; throws on failure (caller cleans up).
+async function runPipeline(pdfPath, deckId, opts) {
+  const deckDir = path.join(decksDir, deckId);
+  fs.mkdirSync(deckDir, { recursive: true });
+
+  const manifest = await processPDF(pdfPath, deckDir, opts);
+
+  // If voiceover is on, build a single .zip with pptx + mp3.
+  if (opts.voiceover && manifest.voiceoverUrl) {
+    const zipPath = path.join(deckDir, 'deck.zip');
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(zipPath);
+      const a = archiver('zip', { zlib: { level: 6 } });
+      out.on('close', resolve);
+      out.on('error', reject);
+      a.on('error', reject);
+      a.pipe(out);
+      a.file(path.join(deckDir, 'deck.pptx'), { name: 'deck.pptx' });
+      a.file(path.join(deckDir, 'voiceover.mp3'), { name: 'voiceover.mp3' });
+      a.finalize();
+    });
+    const zstats = fs.statSync(zipPath);
+    manifest.downloadUrl = `/decks/${deckId}/deck.zip`;
+    manifest.downloadBytes = zstats.size;
+    manifest.downloadFilename = 'deck.zip';
+  } else {
+    manifest.downloadUrl = `/decks/${deckId}/deck.pptx`;
+    manifest.downloadBytes = manifest.pptxBytes || 0;
+    manifest.downloadFilename = 'deck.pptx';
+  }
+
+  return manifest;
+}
+
+// Writes a status.json into the deck dir so async clients can poll progress.
+function writeDeckStatus(deckId, status, extra) {
+  try {
+    const deckDir = path.join(decksDir, deckId);
+    fs.mkdirSync(deckDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(deckDir, 'status.json'),
+      JSON.stringify({ deckId, status, updatedAt: new Date().toISOString(), ...extra }, null, 2)
+    );
+  } catch (_) { /* non-fatal */ }
+}
+
 // Upload endpoint — Presenton ~30-90s, TTS ~3-5x realtime on CPU.
 // Default 10-min timeout. Set REQUEST_TIMEOUT_MS=... to override.
 app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) => {
@@ -120,36 +169,11 @@ app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) 
   const deckDir = path.join(decksDir, deckId);
 
   try {
-    fs.mkdirSync(deckDir, { recursive: true });
-
     console.log(`Processing PDF: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
-    const manifest = await processPDF(req.file.path, deckDir, { voiceover: wantVoiceover, slides });
-
-    // If voiceover is on, build a single .zip with pptx + mp3.
-    let downloadUrl;
-    let downloadBytes;
-    if (wantVoiceover && manifest.voiceoverUrl) {
-      const zipPath = path.join(deckDir, 'deck.zip');
-      await new Promise((resolve, reject) => {
-        const out = fs.createWriteStream(zipPath);
-        const a = archiver('zip', { zlib: { level: 6 } });
-        out.on('close', resolve);
-        out.on('error', reject);
-        a.on('error', reject);
-        a.pipe(out);
-        a.file(path.join(deckDir, 'deck.pptx'), { name: 'deck.pptx' });
-        a.file(path.join(deckDir, 'voiceover.mp3'), { name: 'voiceover.mp3' });
-        a.finalize();
-      });
-      const zstats = fs.statSync(zipPath);
-      downloadUrl = `/decks/${deckId}/deck.zip`;
-      downloadBytes = zstats.size;
-      manifest.downloadFilename = 'deck.zip';
-    } else {
-      downloadUrl = `/decks/${deckId}/deck.pptx`;
-      downloadBytes = manifest.pptxBytes || 0;
-      manifest.downloadFilename = 'deck.pptx';
-    }
+    const manifest = await runPipeline(req.file.path, deckId, {
+      voiceover: wantVoiceover,
+      slides,
+    });
 
     // Clean up uploaded PDF
     fs.unlinkSync(req.file.path);
@@ -158,8 +182,8 @@ app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) 
       success: true,
       deckId,
       manifest,
-      downloadUrl,
-      downloadBytes,
+      downloadUrl: manifest.downloadUrl,
+      downloadBytes: manifest.downloadBytes,
     });
   } catch (error) {
     console.error('Processing error:', error);
@@ -169,6 +193,82 @@ app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) 
       error: error.message || 'Failed to process PDF',
     });
   }
+});
+
+// Async upload endpoint — returns immediately with a deckId; the pipeline
+// runs in the background. Clients poll GET /api/decks/:deckId/status until
+// it reports "completed" (manifest.json exists) or "failed".
+app.post('/api/upload-async', requireApiToken, upload.single('pdf'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No PDF file uploaded' });
+  }
+
+  const wantVoiceover = req.query.voiceover === '1' || req.body.voiceover === '1';
+
+  const slidesParam = req.query.slides || req.body.slides;
+  let slides;
+  if (slidesParam !== undefined && slidesParam !== null && slidesParam !== '') {
+    slides = parseInt(slidesParam, 10);
+    if (!Number.isFinite(slides) || slides < 1 || slides > 50) {
+      // Reject before queueing — clean up the uploaded file.
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'slides must be a number between 1 and 50' });
+    }
+  }
+
+  const deckId = uuidv4();
+  const pdfPath = req.file.path;
+  writeDeckStatus(deckId, 'queued', { filename: req.file.originalname });
+
+  // Respond immediately — the deck is now owned by the background task.
+  res.status(202).json({
+    success: true,
+    deckId,
+    status: 'queued',
+    pollUrl: `/api/decks/${deckId}/status`,
+  });
+
+  // Background processing. Not awaited so the response returns instantly.
+  // The single-threaded event loop means only one deck is actually
+  // processed at a time; extra queued jobs wait their turn naturally.
+  (async () => {
+    try {
+      writeDeckStatus(deckId, 'processing', { filename: req.file.originalname });
+      console.log(`[async] Processing PDF: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
+      const manifest = await runPipeline(pdfPath, deckId, {
+        voiceover: wantVoiceover,
+        slides,
+      });
+      fs.unlinkSync(pdfPath);
+      writeDeckStatus(deckId, 'completed');
+      console.log(`[async] Deck ready: ${deckId}`);
+    } catch (error) {
+      console.error(`[async] Processing error for ${deckId}:`, error);
+      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+      writeDeckStatus(deckId, 'failed', { error: error.message || 'Failed to process PDF' });
+    }
+  })();
+});
+
+// Deck processing status — for async clients.
+app.get('/api/decks/:deckId/status', (req, res) => {
+  const deckId = req.params.deckId;
+  const deckDir = path.join(decksDir, deckId);
+  if (!fs.existsSync(deckDir)) {
+    return res.status(404).json({ error: 'Deck not found' });
+  }
+  // Completed decks have a manifest.json; otherwise read status.json.
+  const manifestPath = path.join(deckDir, 'manifest.json');
+  if (fs.existsSync(manifestPath)) {
+    return res.json({ deckId, status: 'completed' });
+  }
+  const statusPath = path.join(deckDir, 'status.json');
+  if (fs.existsSync(statusPath)) {
+    let status;
+    try { status = JSON.parse(fs.readFileSync(statusPath, 'utf-8')); } catch (_) { status = {}; }
+    return res.json({ deckId, status: status.status || 'processing', error: status.error || null, filename: status.filename || null });
+  }
+  res.json({ deckId, status: 'queued' });
 });
 
 // Get deck manifest
