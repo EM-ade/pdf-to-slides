@@ -8,7 +8,7 @@ services:
       - LLM=custom
       - CUSTOM_LLM_URL=https://api.commandcode.ai/provider/v1
       - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
-      - CUSTOM_MODEL=deepseek/deepseek-v4-flash
+      - CUSTOM_MODEL=${CUSTOM_MODEL:-Qwen/Qwen3.8-Flash}
       - IMAGE_PROVIDER=pexels
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - CAN_CHANGE_KEYS=false
