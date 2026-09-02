@@ -8,7 +8,7 @@ services:
       - LLM=custom
       - CUSTOM_LLM_URL=https://api.commandcode.ai/provider/v1
       - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
-      - CUSTOM_MODEL=minimax/minimax-m3-free
+      - CUSTOM_MODEL=deepseek/deepseek-v4-flash
       - IMAGE_PROVIDER=pexels
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - CAN_CHANGE_KEYS=false
@@ -27,7 +27,7 @@ services:
       - PPT_SLIDES=${PPT_SLIDES:-10}
       - PPT_TONE=${PPT_TONE:-educational}
       - PPT_LANGUAGE=${PPT_LANGUAGE:-English}
-      - PPT_VERBOSITY=${PPT_VERBOSITY:-standard}
+      - PPT_VERBOSITY=${PPT_VERBOSITY:-concise}
       - TTS_URL=${TTS_URL:-https://api.openai.com/v1/audio/speech}
       - TTS_VOICE=${TTS_VOICE:-nova}
       - TTS_MODEL=${TTS_MODEL:-tts-1}
