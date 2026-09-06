@@ -921,8 +921,15 @@ async function processPDF(pdfPath, deckDir, options = {}) {
         lastErr = e;
       }
       if (attempt < MAX_ATTEMPTS) {
-        const wait = 4000 * attempt;
-        console.log(`        attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying in ${wait / 1000}s: ${lastErr.message.slice(0, 120)}`);
+        let wait = 4000 * attempt;
+        const msg = lastErr.message || '';
+        if (/429|Too Many Requests|RESOURCE_EXHAUSTED/i.test(msg)) {
+          const m = msg.match(/retryDelay[^0-9]*([0-9.]+)s/i) || msg.match(/retry in ([0-9.]+)s/i);
+          const retrySec = m ? parseFloat(m[1]) : 5;
+          wait = Math.max(wait, (retrySec + 2) * 1000);
+        }
+        wait = Math.round(wait * (0.9 + Math.random() * 0.2));
+        console.log(`        attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying in ${wait / 1000}s: ${msg.slice(0, 180)}`);
         await new Promise((res) => setTimeout(res, wait));
       }
     }
@@ -1145,8 +1152,15 @@ async function processContent(contentInput, deckDir, options = {}) {
         lastErr = e;
       }
       if (attempt < MAX_ATTEMPTS) {
-        const wait = 4000 * attempt;
-        console.log(`        attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying in ${wait / 1000}s: ${lastErr.message.slice(0, 120)}`);
+        let wait = 4000 * attempt;
+        const msg = lastErr.message || '';
+        if (/429|Too Many Requests|RESOURCE_EXHAUSTED/i.test(msg)) {
+          const m = msg.match(/retryDelay[^0-9]*([0-9.]+)s/i) || msg.match(/retry in ([0-9.]+)s/i);
+          const retrySec = m ? parseFloat(m[1]) : 5;
+          wait = Math.max(wait, (retrySec + 2) * 1000);
+        }
+        wait = Math.round(wait * (0.9 + Math.random() * 0.2));
+        console.log(`        attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying in ${wait / 1000}s: ${msg.slice(0, 180)}`);
         await new Promise((res) => setTimeout(res, wait));
       }
     }
