@@ -6,9 +6,9 @@ services:
       - "5001:80"
     environment:
       - LLM=custom
-      - CUSTOM_LLM_URL=https://api.commandcode.ai/provider/v1
+      - CUSTOM_LLM_URL=${CUSTOM_LLM_URL:-https://api.opencode.ai/v1}
       - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
-      - CUSTOM_MODEL=${CUSTOM_MODEL:-Qwen/Qwen3.8-Flash}
+      - CUSTOM_MODEL=${CUSTOM_MODEL:-opencode/muse-spark-1.2-free}
       - IMAGE_PROVIDER=pexels
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - CAN_CHANGE_KEYS=false
