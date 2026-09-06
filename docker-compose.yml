@@ -8,7 +8,7 @@ services:
       - LLM=custom
       - CUSTOM_LLM_URL=${CUSTOM_LLM_URL:-https://opencode.ai/zen/go/v1}
       - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
-      - CUSTOM_MODEL=${CUSTOM_MODEL:-mimo-v2.5:free}
+      - CUSTOM_MODEL=${CUSTOM_MODEL:-deepseek/deepseek-v4-flash:free}
       - IMAGE_PROVIDER=pexels
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - CAN_CHANGE_KEYS=false
