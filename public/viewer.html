@@ -549,8 +549,11 @@
             el.style.height = (it.h / slideH * 100) + '%';
             const pt = it.fontSize || 18;
             const vw = (pt / 72) * 13.333333;
-            el.style.fontSize = 'min(' + vw + 'vw, ' + (pt * 1.4) + 'px)';
-            el.style.lineHeight = '1.15';
+            // 0.95 scale prevents headers from overflowing their boxes
+            el.style.fontSize = 'min(' + (vw * 0.9) + 'vw, ' + (pt * 1.05) + 'px)';
+            el.style.lineHeight = '1.2';
+            el.style.overflowWrap = 'break-word';
+            el.style.wordBreak = 'break-word';
             if (it.color) el.style.color = it.color;
             el.textContent = it.text;
             slideEl.appendChild(el);

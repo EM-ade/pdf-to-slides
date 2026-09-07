@@ -383,12 +383,12 @@ async function rewriteNarrationForStudents(slides) {
 
   const systemPrompt = `You are rewriting presenter notes from a slide deck into a narration script that will be read aloud by a text-to-speech voice.
 
-The notes were written for a TEACHER to read while presenting. Your job is to convert them into words the VOICE speaks DIRECTLY TO THE STUDENTS.
+The notes were written for a TEACHER to read while presenting. Your job is to convert them into words the VOICE speaks DIRECTLY TO THE STUDENTS, with a lengthy, thorough explanation of what the slide is actually about.
 
 Rules:
 - Address the student as "you" (e.g. "Today you'll learn...", "Notice how...", "Try to think about why...").
 - Never use teacher-facing language: no "This slide outlines...", "The presenter should...", "We will cover...", "Today's session...".
-- Keep the same length and ideas as the original note. 1-3 sentences per slide.
+- Expand each note into 4-6 sentences (120-180 words) per slide. Explain the concept in depth, why it matters, give a concrete real-world example, and briefly connect it to the previous slide where relevant. Do NOT be brief — the student should fully understand the topic from your narration alone.
 - Sound like a calm, friendly tutor talking one-on-one to a 12-17 year old.
 - Do not invent facts not present in the original.
 - Output JSON only: {"slides":[{"index":0,"text":"..."},...]}, one entry per input slide in the same order.`;
@@ -560,9 +560,11 @@ function parseSlideItems(xml, rels) {
     const text = collectText(block);
     if (text.length === 0) continue;
 
-    // font size (first run that has one)
+    // font size (first run that has one) — cap headers so they don't clip
     const szMatch = block.match(/<a:rPr[^>]*\bsz="(\d+)"/);
-    const fontSize = szMatch ? parseInt(szMatch[1], 10) / 100 : null; // hundredths of a point
+    let fontSize = szMatch ? parseInt(szMatch[1], 10) / 100 : null; // hundredths of a point
+    if (fontSize && fontSize > 36) fontSize = 28;
+    else if (fontSize && fontSize > 28) fontSize = Math.round(fontSize * 0.85);
     // color
     let color = null;
     const cMatch = block.match(/<a:solidFill>[\s\S]*?<a:srgbClr\s+val="([0-9A-Fa-f]{6})"/);
