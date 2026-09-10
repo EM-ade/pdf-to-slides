@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const archiver = require('archiver');
-const { processPDF, processContent } = require('./pipeline');
+const { processPDF, processPPTX, processContent } = require('./pipeline');
 
 const app = express();
 const PORT = process.env.PORT || 3005;
@@ -37,13 +37,23 @@ const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
+    const name = (file.originalname || '').toLowerCase();
+    const isPdf = file.mimetype === 'application/pdf' || name.endsWith('.pdf');
+    const isPptx = file.mimetype === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+      || file.mimetype === 'application/vnd.ms-powerpoint'
+      || name.endsWith('.pptx') || name.endsWith('.ppt');
+    if (isPdf || isPptx) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF files are allowed'));
+      cb(new Error('Only PDF and PPTX files are allowed'));
     }
   }
 });
+
+function isPptxFile(file) {
+  const name = (file.originalname || '').toLowerCase();
+  return name.endsWith('.pptx') || name.endsWith('.ppt') || file.mimetype.includes('presentation') || file.mimetype.includes('powerpoint');
+}
 
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -96,14 +106,17 @@ app.get('/decks/:deckId/view', (req, res) => {
 });
 
 // Shared pipeline runner for both the synchronous /api/upload and the
-// async /api/upload-async endpoints. Handles the PDF → deck pipeline,
+// async /api/upload-async endpoints. Handles PDF/PPTX → deck pipeline,
 // optional voiceover zip, and writing manifest.json / deck files.
 // Returns the deckId on success; throws on failure (caller cleans up).
 async function runPipeline(pdfPath, deckId, opts) {
   const deckDir = path.join(decksDir, deckId);
   fs.mkdirSync(deckDir, { recursive: true });
 
-  const manifest = await processPDF(pdfPath, deckDir, opts);
+  const isPptx = (pdfPath || '').toLowerCase().endsWith('.pptx') || (pdfPath || '').toLowerCase().endsWith('.ppt');
+  const manifest = isPptx
+    ? await processPPTX(pdfPath, deckDir, opts)
+    : await processPDF(pdfPath, deckDir, opts);
 
   // If voiceover is on, build a single .zip with pptx + mp3.
   if (opts.voiceover && manifest.voiceoverUrl) {
@@ -209,12 +222,13 @@ async function hashPdfFile(pdfPath) {
 
 // Upload endpoint — Presenton ~30-90s, TTS ~3-5x realtime on CPU.
 // Default 10-min timeout. Set REQUEST_TIMEOUT_MS=... to override.
+// Accepts PDF or PPTX (field name 'pdf' for backward compat, also 'file').
 app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) => {
   req.setTimeout(TIMEOUT_MS);
   res.setTimeout(TIMEOUT_MS);
 
   if (!req.file) {
-    return res.status(400).json({ error: 'No PDF file uploaded' });
+    return res.status(400).json({ error: 'No PDF or PPTX file uploaded' });
   }
 
   const wantVoiceover = req.query.voiceover === '1' || req.body.voiceover === '1';
@@ -233,7 +247,8 @@ app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) 
   const deckDir = path.join(decksDir, deckId);
 
   try {
-    console.log(`Processing PDF: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
+    const ftype = isPptxFile(req.file) ? 'PPTX' : 'PDF';
+    console.log(`Processing ${ftype}: ${req.file.originalname}${wantVoiceover ? ' (with voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
     const manifest = await runPipeline(req.file.path, deckId, {
       voiceover: wantVoiceover,
       slides,
@@ -262,9 +277,10 @@ app.post('/api/upload', requireApiToken, upload.single('pdf'), async (req, res) 
 // Async upload endpoint — returns immediately with a deckId; the pipeline
 // runs in the background. Clients poll GET /api/decks/:deckId/status until
 // it reports "completed" (manifest.json exists) or "failed".
+// Accepts PDF or PPTX.
 app.post('/api/upload-async', requireApiToken, upload.single('pdf'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: 'No PDF file uploaded' });
+    return res.status(400).json({ error: 'No PDF or PPTX file uploaded' });
   }
 
   const wantVoiceover = req.query.voiceover === '1' || req.body.voiceover === '1';
@@ -332,7 +348,8 @@ app.post('/api/upload-async', requireApiToken, upload.single('pdf'), async (req,
     const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
     try {
       writeDeckStatus(deckId, 'processing', { filename: req.file.originalname });
-      console.log(`[async] Start ${deckId}: ${req.file.originalname}${wantVoiceover ? ' (voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
+      const ftype2 = isPptxFile(req.file) ? 'PPTX' : 'PDF';
+      console.log(`[async] Start ${deckId} [${ftype2}]: ${req.file.originalname}${wantVoiceover ? ' (voiceover)' : ''}${slides ? ` (${slides} slides)` : ''}`);
       const manifest = await runPipeline(pdfPath, deckId, {
         voiceover: wantVoiceover,
         slides,

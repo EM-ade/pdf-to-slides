@@ -383,14 +383,20 @@ async function rewriteNarrationForStudents(slides) {
 
   const systemPrompt = `You are rewriting presenter notes from a slide deck into a narration script that will be read aloud by a text-to-speech voice.
 
-The notes were written for a TEACHER to read while presenting. Your job is to convert them into words the VOICE speaks DIRECTLY TO THE STUDENTS, with a lengthy, thorough explanation of what the slide is actually about.
+The notes were written for a TEACHER to read while presenting. Your job is to convert them into words the VOICE speaks DIRECTLY TO THE STUDENTS, with a lengthy, thorough explanation of what the slide is actually about. The student must understand the concept fully from your narration alone without seeing the slide.
 
 Rules:
-- Address the student as "you" (e.g. "Today you'll learn...", "Notice how...", "Try to think about why...").
+- Address the student as "you" (e.g. "Imagine you are...", "Have you ever wondered why...", "Let's explore how...").
 - Never use teacher-facing language: no "This slide outlines...", "The presenter should...", "We will cover...", "Today's session...".
-- Expand each note into 4-6 sentences (120-180 words) per slide. Explain the concept in depth, why it matters, give a concrete real-world example, and briefly connect it to the previous slide where relevant. Do NOT be brief — the student should fully understand the topic from your narration alone.
-- Sound like a calm, friendly tutor talking one-on-one to a 12-17 year old.
-- Do not invent facts not present in the original.
+- Expand each note into a lengthy, engaging explanation: 6-8 sentences (180-250 words) per slide. Structure each narration as:
+  1) Hook — a relatable question or scenario to capture attention
+  2) What this slide is about — clear, simple explanation of the core concept in your own words
+  3) Why it matters — the importance, implications, or real-world relevance
+  4) Concrete example or analogy appropriate for a 12-17 year old (everyday life, school, technology, etc.)
+  5) Brief recap and smooth transition hint to the next idea
+- Use natural, conversational pacing with varied sentence length for TTS rhythm. Add occasional pauses via commas and short sentences.
+- Sound like a warm, encouraging tutor talking one-on-one — enthusiastic but calm, not robotic.
+- Stay faithful to the original note's facts but you may elaborate with general knowledge to make it truly educational and lengthy. Do not hallucinate specific data not implied.
 - Output JSON only: {"slides":[{"index":0,"text":"..."},...]}, one entry per input slide in the same order.`;
 
   const userPayload = slides.map((s, i) => ({ index: i, text: s.note || `Slide ${i + 1}.` }));
@@ -446,6 +452,108 @@ Rules:
     return { ...s, note: (found && found.text) ? String(found.text).trim() : s.note };
   });
   return out;
+}
+
+// Extract plain text per slide from a PPTX (quick, no media copy) — used for PPTX voiceover.
+async function getSlideTextsFromPptx(pptxPath) {
+  const buf = fs.readFileSync(pptxPath);
+  const zip = await JSZip.loadAsync(buf);
+  const slideNames = Object.keys(zip.files)
+    .filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+    .sort((a, b) => parseInt(a.match(/slide(\d+)\.xml$/)[1], 10) - parseInt(b.match(/slide(\d+)\.xml$/)[1], 10));
+  const out = [];
+  for (let i = 0; i < slideNames.length; i++) {
+    const xml = await zip.files[slideNames[i]].async('string');
+    // Reuse collectText via parsing shape blocks
+    const texts = [];
+    const spRe = /<p:sp>[\s\S]*?<\/p:sp>/g;
+    let m;
+    while ((m = spRe.exec(xml)) !== null) {
+      const t = collectText(m[0]);
+      if (t && t.trim()) texts.push(t.trim());
+    }
+    const full = texts.join('\n').trim();
+    out.push({ index: i, text: full || `Slide ${i + 1}` });
+  }
+  return out;
+}
+
+// Generate lengthy student-facing narration directly from slide text content (for PPTX upload).
+async function generateNarrationFromSlideContent(slidesContent) {
+  const apiKey = process.env.CUSTOM_LLM_API_KEY;
+  const baseUrl = (process.env.CUSTOM_LLM_URL || 'https://api.commandcode.ai/provider/v1').replace(/\/+$/, '');
+  const model = process.env.CUSTOM_MODEL || 'deepseek/deepseek-v4-flash';
+  if (!apiKey) throw new Error('CUSTOM_LLM_API_KEY not set; cannot generate narration');
+
+  const systemPrompt = `You are creating a narration script that will be read aloud by a text-to-speech voice directly to students (12-17 years old).
+
+You are given the TEXT content extracted from each slide of a presentation (already visible on screen). Your job is to EXPLAIN each slide thoroughly as if you are a friendly tutor standing next to the student.
+
+Rules:
+- Address the student as "you" (e.g. "Imagine you...", "Have you ever wondered...").
+- For each slide, produce a lengthy, engaging explanation: 6-8 sentences (180-250 words). Structure as:
+  1) Hook — relatable question or scenario
+  2) What this slide is about — clear explanation of the core idea in simple language
+  3) Why it matters — importance and real-world relevance
+  4) Concrete everyday example or analogy for a teenager
+  5) Brief recap and transition
+- Use natural, conversational pacing with varied sentence length for TTS rhythm.
+- Sound warm, encouraging, enthusiastic but calm.
+- Base your explanation on the slide text provided, but you may elaborate with general knowledge to make it educational and lengthy. Do not invent specific statistics not implied.
+- Output JSON only: {"slides":[{"index":0,"text":"..."},...]}, one entry per input slide in the same order.`;
+
+  const userPayload = slidesContent.map((s) => ({ index: s.index, text: s.text }));
+
+  const body = JSON.stringify({
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify({ slides: userPayload }) },
+    ],
+    temperature: 0.5,
+    response_format: { type: 'json_object' },
+  });
+
+  const url = new URL(baseUrl + '/chat/completions');
+  const lib = url.protocol === 'http:' ? http : https;
+  const raw = await new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'http:' ? 80 : 443),
+        path: url.pathname,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${apiKey}`,
+        },
+      },
+      (res) => {
+        let chunks = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (chunks += c));
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return reject(new Error(`LLM HTTP ${res.statusCode}: ${chunks.slice(0, 500)}`));
+          }
+          try { resolve(JSON.parse(chunks)); } catch (e) { reject(new Error('bad JSON: ' + e.message)); }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+
+  const content = raw?.choices?.[0]?.message?.content;
+  if (!content) throw new Error('LLM returned no content: ' + JSON.stringify(raw).slice(0, 200));
+  const parsed = JSON.parse(content);
+  if (!parsed.slides || !Array.isArray(parsed.slides)) throw new Error('LLM did not return {slides: [...]}');
+  return slidesContent.map((s, i) => {
+    const found = parsed.slides.find((x) => x && (x.index === i || x.index === s.index));
+    return { index: s.index, note: (found && found.text) ? String(found.text).trim() : s.text };
+  });
 }
 
 // Extract per-slide render data and copy referenced media into deckDir/media/.
@@ -990,6 +1098,41 @@ async function processPDF(pdfPath, deckDir, options = {}) {
   return manifest;
 }
 
+async function processPPTX(pptxInputPath, deckDir, options = {}) {
+  const t0 = Date.now();
+  const wantVoiceover = options.voiceover === true;
+  const title = path.basename(pptxInputPath, path.extname(pptxInputPath)) || 'Presentation';
+  console.log('  [1/3] Copying uploaded PPTX...');
+  const pptxPath = path.join(deckDir, 'deck.pptx');
+  if (path.resolve(pptxInputPath) !== path.resolve(pptxPath)) {
+    await copyFile(pptxInputPath, pptxPath);
+  }
+  const stats = fs.statSync(pptxPath);
+  console.log(`        saved: ${pptxPath} (${stats.size} bytes)`);
+
+  let slideCount = 0;
+  try {
+    const buf = fs.readFileSync(pptxPath);
+    const zip = await JSZip.loadAsync(buf);
+    slideCount = Object.keys(zip.files).filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n)).length;
+  } catch (_) {}
+  if (!slideCount) slideCount = 10;
+  console.log(`        detected ${slideCount} slides`);
+
+  console.log(`  [2/3] Finalizing deck (voiceover/render)... (${elapsedSince(t0)} elapsed)`);
+  const manifest = await finalizeDeck(deckDir, pptxPath, {
+    title,
+    slideCount,
+    presentationId: null,
+    template: TEMPLATE,
+    wantVoiceover,
+    isPptx: true,
+    pptxPath,
+  });
+  console.log(`  [3/3] Done. Total ${elapsedSince(t0)}`);
+  return manifest;
+}
+
 // Shared tail of the pipeline: voiceover generation (optional), slide
 // render-data extraction, and manifest write. Used by both processPDF and
 // processContent so the embed API gets identical post-processing.
@@ -1015,28 +1158,50 @@ async function finalizeDeck(deckDir, pptxPath, opts) {
   // viewer, so non-voiceover decks skip it as before).
   const voiceoverPromise = (async () => {
     if (!opts.wantVoiceover) return;
-    console.log('  [voiceover] Fetching slide notes...');
     let slides = [];
-    try {
-      slides = await fetchSlides(opts.presentationId);
-      console.log(`        fetched ${slides.length} slide notes`);
-    } catch (e) {
-      console.log(`        could not fetch slide notes: ${e.message}`);
-    }
-    if (slides.length === 0) {
-      slides = Array.from({ length: opts.slideCount }, (_, i) => ({
-        index: i,
-        note: `Slide ${i + 1}.`,
-      }));
-    }
-    // Optionally rewrite the notes through the LLM so narration is direct
-    // student-facing speech instead of presenter-facing notes.
-    if (process.env.NARRATION_REWRITE === '1' && slides.some(s => s.note)) {
+    if (opts.isPptx) {
+      // PPTX upload: extract slide text directly from the file and generate lengthy narration
+      console.log('  [voiceover] Extracting slide text from PPTX...');
+      let slidesContent = [];
       try {
-        slides = await rewriteNarrationForStudents(slides);
-        console.log('        narration rewritten for student-facing tone');
+        slidesContent = await getSlideTextsFromPptx(opts.pptxPath || pptxPath);
+        console.log(`        extracted ${slidesContent.length} slides text from PPTX`);
       } catch (e) {
-        console.log(`        narration rewrite failed, using raw notes: ${e.message}`);
+        console.log(`        could not extract PPTX text: ${e.message}`);
+      }
+      if (slidesContent.length === 0) {
+        slidesContent = Array.from({ length: opts.slideCount }, (_, i) => ({ index: i, text: `Slide ${i + 1}` }));
+      }
+      try {
+        slides = await generateNarrationFromSlideContent(slidesContent);
+        console.log(`        lengthy narration generated for ${slides.length} slides`);
+      } catch (e) {
+        console.log(`        narration generation failed, using raw slide text: ${e.message}`);
+        slides = slidesContent.map((s) => ({ index: s.index, note: s.text }));
+      }
+    } else {
+      console.log('  [voiceover] Fetching slide notes...');
+      try {
+        slides = await fetchSlides(opts.presentationId);
+        console.log(`        fetched ${slides.length} slide notes`);
+      } catch (e) {
+        console.log(`        could not fetch slide notes: ${e.message}`);
+      }
+      if (slides.length === 0) {
+        slides = Array.from({ length: opts.slideCount }, (_, i) => ({
+          index: i,
+          note: `Slide ${i + 1}.`,
+        }));
+      }
+      // Optionally rewrite the notes through the LLM so narration is direct
+      // student-facing speech instead of presenter-facing notes.
+      if (process.env.NARRATION_REWRITE === '1' && slides.some((s) => s.note)) {
+        try {
+          slides = await rewriteNarrationForStudents(slides);
+          console.log('        narration rewritten for student-facing tone');
+        } catch (e) {
+          console.log(`        narration rewrite failed, using raw notes: ${e.message}`);
+        }
       }
     }
     const voiceover = await generateVoiceover(slides, deckDir);
@@ -1218,4 +1383,4 @@ async function processContent(contentInput, deckDir, options = {}) {
   return manifest;
 }
 
-module.exports = { processPDF, processContent };
+module.exports = { processPDF, processPPTX, processContent };

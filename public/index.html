@@ -184,8 +184,8 @@
 </head>
 <body>
   <div class="container">
-    <h1>PDF to Slides</h1>
-    <p class="subtitle">Upload a PDF and get back an editable, professionally designed .pptx</p>
+    <h1>PDF / PPTX to Slides</h1>
+    <p class="subtitle">Upload a PDF or PPTX and get back an editable deck with optional lengthy student narration</p>
 
     <div class="demo-banner" id="demoBanner">
       <strong>Powered by Presenton</strong> &mdash; open-source AI presentation generator
@@ -199,10 +199,10 @@
     <div class="upload-card">
       <div class="drop-zone" id="dropZone">
         <div class="icon">📄</div>
-        <p>Drag & drop a PDF here</p>
+        <p>Drag & drop a PDF or PPTX here</p>
         <p style="font-size: 12px; color: #999;">or click to browse</p>
       </div>
-      <input type="file" id="fileInput" accept=".pdf">
+      <input type="file" id="fileInput" accept=".pdf,.pptx,.ppt">
       <p class="filename" id="filename"></p>
       <label class="opt-row">
         <input type="checkbox" id="voiceoverCb" checked>
@@ -251,8 +251,11 @@
       e.preventDefault();
       dropZone.classList.remove('dragover');
       const file = e.dataTransfer.files[0];
-      if (file && file.type === 'application/pdf') {
-        selectFile(file);
+      if (file) {
+        const name = file.name.toLowerCase();
+        const isPdf = file.type === 'application/pdf' || name.endsWith('.pdf');
+        const isPptx = name.endsWith('.pptx') || name.endsWith('.ppt') || file.type.includes('presentation') || file.type.includes('powerpoint');
+        if (isPdf || isPptx) selectFile(file);
       }
     });
 
